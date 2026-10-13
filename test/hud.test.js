@@ -1,0 +1,283 @@
+// test/hud.test.js - the stream's HUD drawn by src/hud.js (node-canvas) for three states (test/fixtures/hud-states.json:
+// a real game whose player polled with no why, a long sample, a test game): the measured layout, no text overlapping
+// another or leaving its column, a draw well inside a frame once measured
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import path from 'node:path';
+import { createRequire } from 'node:module';
+import { fileURLToPath } from 'node:url';
+import { drawHud, hudSig } from '../src/hud.js';
+import { GOAL_TITLES } from '../src/goals.js';
+import { createUiPanel } from '../src/ui-panel.js';
+import { callerOf, replyHead, cleanTerm, createTermFeed } from '../src/terminal.js';
+import { planText } from '../src/report.js';
+
+const here = path.dirname(fileURLToPath(import.meta.url));
+const require = createRequire(import.meta.url);
+const { createCanvas } = require('canvas');
+const STATES = JSON.parse(fs.readFileSync(path.join(here, 'fixtures', 'hud-states.json'), 'utf8'));
+
+test('HUD: the design\'s three states drawn as the design measured them, with no text problem', () => {
+  createUiPanel({ width: 1080, height: 472, over: 72 }); // the fonts, registered once
+  const want = {
+    nowhy: { goal: [644, 60], thinking: [704, 30], columns: [744, 152], rawLines: 8, rawEntries: 5 },
+    long: { goal: [644, 40], thinking: [684, 86], columns: [780, 120], rawLines: 8, rawEntries: 5 },
+    fresh: { goal: [644, 40], thinking: [684, 86], columns: [780, 132], rawLines: 7, rawEntries: 5 },
+  };
+  const g = createCanvas(1080, 1080).getContext('2d');
+  for (const [key, w] of Object.entries(want)) {
+    const st = { ...STATES[key], caller: STATES[key].raw.entries[0]?.by === 'smoke-script' ? 'TEST SCRIPT' : 'AGENT' };
+    const r = drawHud(g, st, {});
+    assert.deepEqual({ goal: r.layout.goal, thinking: r.layout.thinking, columns: r.layout.columns, rawLines: r.layout.rawLines, rawEntries: r.layout.rawEntries }, w, key);
+    assert.deepEqual(r.qa.problems, [], `${key}: no text overlaps, leaves the canvas or crosses its column`);
+    // measured once: drawing it again is quick (the layout and the wraps are measured from cache)
+    const t0 = process.hrtime.bigint();
+    drawHud(g, st, {});
+    const ms = Number(process.hrtime.bigint() - t0) / 1e6;
+    assert.ok(ms < 120, `${key}: ${ms.toFixed(1)} ms`);
+  }
+});
+
+test('HUD: the why\'s age is the age of the call that carried it, not of a newer call', () => {
+  let t = 1_000_000;
+  const p = createUiPanel({ width: 1080, height: 472, over: 72, now: () => t });
+  p.term({ lines: [{ k: 'call', t: '> play_sequence', tool: 'play_sequence', words: 'Wood first', plan: 'Then a pickaxe', of: 1, steps: [{ say: 'Mine 4 oak logs', raw: 'collect oak_log 4' }], raw: '{}', rid: 1 }], game: { id: 'g1', s: 13 } });
+  t += 22_000;
+  p.term({ lines: [{ k: 'call', t: '> get_state', tool: 'get_state', raw: '{}', rid: 2 }] });
+  t += 3_000;
+  const th = p.hud(t).state.thinking;
+  assert.equal(Math.round(th.lastCallAgoS), 25, 'the why was sent 25 s ago; the newest call (a look) 3 s ago');
+  assert.deepEqual([th.why, th.plan, th.whyAt], ['Wood first', 'Then a pickaxe', '0:13']);
+});
+
+test('HUD: the caller is named from the MCP client; an empty game draws', () => {
+  let t = 1_000_000;
+  const p = createUiPanel({ width: 1080, height: 472, over: 72, now: () => t });
+  p.term({ caller: 'TEST SCRIPT', lines: [{ k: 'call', t: '> start_game', say: 'Start a new game', tool: 'start_game', raw: '{}', rid: 1 }, { k: 'reply', t: '< New game g1: a new bot.', rid: 1 }], game: { id: 'g1', s: 0 } });
+  t += 1000;
+  p.render(t);
+  const h = p.hud(t);
+  assert.equal(h.state.caller, 'TEST SCRIPT');
+  assert.equal(h.state.currentCall, null, 'no play call yet');
+  assert.equal(h.state.thinking.hasWhy, false);
+  assert.deepEqual(h.qa.problems, []);
+  assert.deepEqual(['example-desktop', 'self-check', 'dec85ec-smoke', 'e2e-iron-switch', 'Example Desktop', '', '#!'].map(callerOf), ['EXAMPLE-DESKTOP', 'TEST SCRIPT', 'TEST SCRIPT', 'TEST SCRIPT', 'EXAMPLE DESKTOP', 'AGENT', 'AGENT']);
+  // a real client whose name only contains such a word is a player, not a test script
+  assert.deepEqual(['Checkmate', 'latest-agent', 'sample-bot', 'smoke-signals', 'my-self-check-bot', 'tester'].map(callerOf), ['CHECKMATE', 'LATEST-AGENT', 'SAMPLE-BOT', 'SMOKE-SIGNALS', 'MY-SELF-CHECK-BOT', 'TESTER']);
+});
+
+const clone = (x) => JSON.parse(JSON.stringify(x));
+const noProblems = (g, st, what) => { const r = drawHud(g, st, { reuse: false }); assert.deepEqual(r.qa.problems, [], what); return r; };
+
+test('HUD goal band: every preset title, a long plain-words goal and a long counted goal fit their columns (the QA sees icons too)', () => {
+  createUiPanel({ width: 1080, height: 472, over: 72 });
+  const g = createCanvas(1080, 1080).getContext('2d');
+  // gc950fd: "Nether and back" ran into the grid's water bucket at a fixed 120 px title column
+  for (const title of Object.values(GOAL_TITLES)) {
+    for (const variant of ['next first', 'all done, long times']) {
+      const st = clone(STATES.nowhy);
+      st.goal.title = title;
+      if (variant === 'next first') st.goal.list.forEach((m, i) => Object.assign(m, i === 0 ? { state: 'next', done: null, progress: '2/3' } : { state: 'todo', done: null }));
+      else st.goal.list.forEach((m) => Object.assign(m, { state: 'done', done: '62:13' }));
+      noProblems(g, st, `${title}, ${variant}`);
+    }
+  }
+  // a long plain-words goal, with and without a title of its own
+  const words = 'build a big wooden house next to the river with a garden, a fence all around it and torches on every wall, then wait there for the night';
+  for (const title of ['', 'a house by the river, with a garden and a fence~']) {
+    const st = clone(STATES.long);
+    st.goal = { kind: 'text', key: 'custom', title, text: words, new: false };
+    noProblems(g, st, `plain words, title "${title}"`);
+  }
+  // a counted goal at the longest title the server makes (40 characters), three parts, the goal before it
+  const st = clone(STATES.long);
+  st.goal.title = 'collect 64 cobblestone, craft 20 torche~';
+  st.goal.parts = [
+    { key: 'get_cobblestone', label: 'Cobblestone collected', icon: 'stone_pickaxe', done: 12, of: 64 },
+    { key: 'make_torch', label: 'Torches made', icon: 'star', done: 3, of: 20 },
+    { key: 'kill_pig', label: 'Pigs killed', icon: 'sword', done: 1, of: 3 },
+  ];
+  noProblems(g, st, 'a long counted goal');
+});
+
+test('HUD stats: no actions by either side yet shows no share, on a neutral rule; one by the body alone is 0 % / 100 %', () => {
+  createUiPanel({ width: 1080, height: 472, over: 72 });
+  const c = createCanvas(1080, 1080), g = c.getContext('2d');
+  const drawn = [];
+  const fill = g.fillText.bind(g);
+  g.fillText = (s, x, y) => { drawn.push(s); fill(s, x, y); };
+  const st = clone(STATES.fresh);
+  st.stats.agentShare = { pct: null, agent: null, reflex: null };
+  noProblems(g, st, 'no actions');
+  assert.ok(drawn.includes('no actions yet'));
+  assert.ok(!drawn.some((s) => /%/.test(s)), 'no percentage');
+  const px = (x) => [...g.getImageData(x, 608, 1, 1).data.slice(0, 3)];
+  assert.deepEqual(px(40), px(1040), 'one colour across');
+  assert.deepEqual(px(40), [0x4e, 0x56, 0x67], 'the neutral grey');
+  drawn.length = 0;
+  st.stats.agentShare = { pct: 0, agent: 0, reflex: 1 };
+  noProblems(g, st, 'the body alone');
+  assert.ok(drawn.includes('0%') && drawn.some((s) => /^reflexes 100%/.test(s)), drawn.filter((s) => /%/.test(s)).join(' | '));
+});
+
+test('HUD layout: kept while only what moves with the clock changes, searched again for new content, the same as a fresh search', () => {
+  createUiPanel({ width: 1080, height: 472, over: 72 });
+  const g = createCanvas(1080, 1080).getContext('2d');
+  const st = clone(STATES.long);
+  const r0 = drawHud(g, st, {});
+  const moved = clone(st);
+  moved.now.gameS += 7; moved.now.gameClock = '44:01'; moved.stats.gameClock = '44:01'; moved.stats.hp = 13; moved.thinking.lastCallAgoS += 0.4;
+  if (moved.currentCall) { moved.currentCall.running = '0:19'; for (const sp of moved.currentCall.steps) if (sp.elapsed) sp.elapsed = '0:12'; }
+  for (const e of moved.raw.entries) e.agoS += 7;
+  assert.equal(hudSig(moved), hudSig(st), 'the content is the same');
+  const r1 = drawHud(g, moved, {});
+  assert.equal(r1.searches, r0.searches, 'no search for a state that only moved with the clock');
+  assert.deepEqual(r1.layout, drawHud(g, moved, { reuse: false }).layout, 'and the layout a fresh search finds');
+  const more = clone(moved);
+  more.raw.entries.unshift({ ...more.raw.entries[0], n: 999, tool: 'get_state', args: '{}', playCallNo: null, hasWhy: false, answer: { state: 'answered', waitingS: null, hudText: null, code: null }, reply: 'state: HP 13, food 20' });
+  more.raw.runs.unshift({ ...more.raw.runs[0], tool: 'get_state', args: '{}', count: 1, ns: [999], newestState: 'answered', latestAnswer: 'state: HP 13, food 20' });
+  more.raw.total += 1;
+  assert.notEqual(hudSig(more), hudSig(moved));
+  const r2 = drawHud(g, more, {});
+  assert.equal(r2.searches, r1.searches + 2, 'a new call: searched again (the fresh search above counted one)');
+  assert.deepEqual(r2.qa.problems, []);
+});
+
+test('panel: drawn again for new content at once, for the clocks and progress once a second; only new drawings are written', () => {
+  const dir = fs.mkdtempSync(path.join(process.env.TMPDIR || '/tmp', 'hud-write-'));
+  let t = 1_000_000;
+  const p = createUiPanel({ width: 1080, height: 472, over: 72, now: () => t, file: path.join(dir, 'panel.bmp') });
+  p.term({ caller: 'AGENT', game: { id: 'g1', s: 10 }, lines: [{ k: 'call', t: '> play_sequence', tool: 'play_sequence', words: 'Wood first', of: 2, rid: 1, raw: '{}',
+    steps: [{ say: 'Mine 4 oak logs', raw: 'collect oak_log 4', skill: 'collect', args: '{"block":"oak_log","n":4}' }, { say: 'Craft 8 oak planks', raw: 'craft oak_planks 8', skill: 'craft', args: '{"item":"oak_planks","n":8}' }] }],
+    live: { mode: 'run', c: 1, s: 1 } });
+  p.write(t);
+  p.perf();
+  const mtime = () => fs.statSync(path.join(dir, 'panel.bmp')).mtimeMs;
+  // 20 frames in the same second with the body's progress moving: nothing drawn, nothing written
+  for (let i = 0; i < 20; i++) { t += 33; if (i % 5 === 0) p.term({ sub: { kind: 'mine', text: 'mining oak log', done: i / 5, of: 4 } }); p.write(t); }
+  let f = p.perf();
+  assert.equal(f.draws, 0, 'progress waits for the second');
+  assert.equal(f.writes, 0);
+  // the next second: drawn and written once
+  t = 1_001_000 + 5; p.write(t);
+  f = p.perf();
+  assert.deepEqual([f.draws, f.writes], [1, 1]);
+  assert.match(String(p.hud(t).state.currentCall.steps[0].sub.done), /^3$/);
+  // a step done (content): drawn at the next frame, not a second later
+  t += 200; p.term({ live: { mode: 'run', c: 1, s: 2 } }); t += 33; p.write(t);
+  f = p.perf();
+  assert.deepEqual([f.draws, f.writes], [1, 1]);
+  assert.ok(f.lagMs.max <= 33 + 200, JSON.stringify(f.lagMs));
+  assert.equal(p.hud(t).state.currentCall.steps[0].state, 'ok');
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+// before the first play call, as the real game feeds it: start_game (its answer with the goal's plan), live_view, the body's
+// dig-in, the care policy (a live HUD once showed the lower half of both columns empty)
+function preCall(caller, goalKey, goalList) {
+  let t = 1_000_000;
+  const p = createUiPanel({ width: 1080, height: 472, over: 72, now: () => t });
+  const plan = planText({ key: goalKey, title: goalKey, text: goalKey === 'custom' ? 'kill 3 pigs' : null, parts: goalKey === 'custom' ? [{ kind: 'kill', target: 'pig', n: 3 }] : null }, { leaseMin: 30 });
+  const start = `New game g88e230: a new bot at a fresh spot with an empty inventory.\n${plan}\nTo resume this game from a new connection, call start_game with game: "h_secret".\n\nSkills (use play or play_sequence):\n- collect`;
+  p.term(cleanTerm({ caller, game: { id: 'g88e230', s: 4 }, goal: { key: goalKey, title: goalKey === 'custom' ? 'kill 3 pigs' : 'Nether and back', text: null, list: goalList }, st: { hp: 20, food: 20, clock: 'DAY 12:57', ticks: 6900, agent: 0, reflex: 2, pct: 0 },
+    lines: [{ k: 'call', t: '> start_game', tool: 'start_game', raw: '{"adult":true}', rid: 1 }, { k: 'reply', t: `< ${replyHead({ content: [{ text: start }] })}`, rid: 1 }], pos: { y: 82, place: 'surface, birch forest' } }));
+  t += 2000; p.term(cleanTerm({ lines: [{ k: 'world', t: 'Care policy set: hide when exposed, critical health 10, eat starving', who: 'server' }] }));
+  t += 3000; p.term(cleanTerm({ lines: [{ k: 'world', t: 'Got 1 dirt', who: 'body' }] }));
+  t += 5000; p.term(cleanTerm({ lines: [{ k: 'call', t: '> live_view', tool: 'live_view', raw: '{}', rid: 2 }, { k: 'reply', t: '< Live view of game g88e230: live on Facebook since 05:41:26 UTC.', rid: 2 }] }));
+  t += 4000;
+  p.render(t);
+  return { p, at: () => t, step: (ms) => { t += ms; } };
+}
+const MILESTONES = ['wooden_pickaxe', 'stone_pickaxe', 'iron_ingot', 'iron_pickaxe', 'diamond', 'diamond_pickaxe', 'water_bucket', 'obsidian', 'flint_and_steel', 'portal_frame', 'nether', 'back'].map((k) => ({ k, t: k.replace(/_/g, ' '), atS: null }));
+
+test('HUD before the first play call: how to read it in the NOW area, RAW grown into what is left, no hole over 30 px; gone with the first play call', () => {
+  for (const caller of ['AGENT', 'TEST SCRIPT', 'EXAMPLE DESKTOP']) {
+    for (const [goalKey, list] of [['nether_and_back', MILESTONES], ['free', MILESTONES], ['custom', [{ k: 'kill_pig', t: 'pigs killed', done: 0, of: 3, atS: null }]]]) {
+      const { p, at, step } = preCall(caller, goalKey, list);
+      const h = p.hud(at());
+      const what = `${caller}, ${goalKey}`;
+      assert.ok(h.layout.fillers.card >= 1, `${what}: the card`);
+      assert.ok(h.layout.leftGap <= 30 && h.layout.rightGap <= 30, `${what}: gaps ${h.layout.leftGap} / ${h.layout.rightGap}`);
+      assert.ok(h.layout.rawLines >= 6, `${what}: RAW ${h.layout.rawLines} lines`);
+      assert.deepEqual(h.qa.problems, [], what);
+      // the first play call: the card is gone
+      step(1000);
+      p.term(cleanTerm({ lines: [{ k: 'call', t: '> play_sequence', tool: 'play_sequence', words: 'Wood first', of: 1, rid: 3, raw: '{}', steps: [{ say: 'Mine 4 oak logs', raw: 'collect oak_log 4', skill: 'collect', args: '{"block":"oak_log","n":4}' }] }], live: { mode: 'run', c: 1, s: 1 } }));
+      step(1000);
+      p.render(at());
+      const h2 = p.hud(at());
+      assert.equal(h2.layout.fillers.card, undefined, `${what}: no card once a play call came`);
+      assert.deepEqual(h2.qa.problems, [], `${what}, after`);
+    }
+  }
+});
+
+test('feed: a new game\'s answer carries the goal\'s plan to RAW, never the resume line with its handle', () => {
+  const text = 'New game g1: a new bot at a fresh spot with an empty inventory.\nGoal: Nether and back. The plan:\n1. wooden pickaxe: collect logs\nTo resume this game from a new connection, call start_game with game: "h_SECRET123".\nThe bot is still joining the world: call get_state in a few seconds.\n\nSkills:\n- collect';
+  const h = replyHead({ content: [{ text }] });
+  assert.equal(h, 'New game g1: a new bot at a fresh spot with an empty inventory. Goal: Nether and back. The plan: 1. wooden pickaxe: collect logs');
+  assert.ok(!/SECRET|resume/i.test(h));
+});
+
+test('feed: the body\'s own actions reach the video between calls, stamped when they happened (g43884a: a dig-in at 0:02 read 0:59)', () => {
+  let clock = 1_000_000;
+  const sent = [];
+  const feed = createTermFeed({ send: (id, u) => sent.push(u), now: () => clock });
+  const journal = [{ seq: 1, at: new Date(clock - 57_000).toISOString(), source: 'care', kind: 'shelter', ok: true, text: 'waiting for your first call at night: dug two blocks down to wait there' }];
+  const game = { id: 'g1', body: { attribution: () => null, onItsOwn: (after) => journal.filter((e) => e.seq > after) } };
+  feed.reply(game, 'start_game', {}, { content: [{ type: 'text', text: 'New game g1: a new bot.' }], structuredContent: {} });
+  feed.tick(game);
+  const own = sent.flatMap((u) => u.lines ?? []).filter((l) => l.k === 'body');
+  assert.equal(own.length, 1, 'between calls, from the body\'s journal');
+  assert.equal(own[0].ago, 57);
+  feed.tick(game);
+  assert.equal(sent.flatMap((u) => u.lines ?? []).filter((l) => l.k === 'body').length, 1, 'once');
+  // the reply that carries it later adds nothing
+  feed.reply(game, 'get_state', {}, { content: [{ type: 'text', text: '' }], structuredContent: { steps: [], onItsOwn: [{ seq: 1, agoS: 70, source: 'care', kind: 'shelter', ok: true, text: journal[0].text }] } });
+  assert.equal(sent.flatMap((u) => u.lines ?? []).filter((l) => l.k === 'body').length, 1);
+  // the panel stamps it 57 s before it came: game time 0:59 - 57 s = 0:02
+  let t = 1_000_000;
+  const p = createUiPanel({ width: 1080, height: 472, over: 72, now: () => t });
+  p.term(cleanTerm({ game: { id: 'g1', s: 59 }, lines: [{ k: 'world', who: 'server', t: 'Care policy set' }] }));
+  p.term(cleanTerm({ lines: [own[0]] }));
+  const ev = p.hud(t).state.events;
+  assert.deepEqual(ev.map((e) => [e.at, e.who]), [['0:59', 'server'], ['0:02', 'body']], 'newest first by when it happened');
+});
+
+test('HUD thinking band: as tall as the why and plan at the first play call (nothing earlier to run on); 76 px with earlier whys', () => {
+  createUiPanel({ width: 1080, height: 472, over: 72 });
+  const g = createCanvas(1080, 1080).getContext('2d');
+  const st = clone(STATES.fresh);
+  st.thinking = { ...st.thinking, hasWhy: true, why: 'Night: dig in until dawn', plan: 'Wait it out in the hole, then logs and a wooden pickaxe at first light.' };
+  st.earlierThinking = [];
+  const r = noProblems(g, st, 'call 1, short why and plan');
+  assert.ok(r.layout.thinking[1] < 76, `band ${r.layout.thinking[1]} px`);
+  const withEarlier = clone(st);
+  withEarlier.earlierThinking = [{ at: '0:10', why: 'Logs first' }];
+  const r2 = noProblems(g, withEarlier, 'with an earlier why');
+  assert.equal(r2.layout.thinking[1], 76);
+  assert.ok(r.layout.rawLines >= r2.layout.rawLines, 'the height went to RAW');
+});
+
+test('HUD: SHELTERED over the video while the body is closed in, until the next play call', () => {
+  let t = 1_000_000;
+  const p = createUiPanel({ width: 1080, height: 472, over: 72, now: () => t });
+  p.term(cleanTerm({ caller: 'AGENT', game: { id: 'g1', s: 40 }, lines: [{ k: 'call', t: '> play', tool: 'play', words: 'Night: dig in', of: 1, rid: 1, raw: '{}', steps: [{ say: 'Build a shelter for the night', raw: 'shelter', skill: 'shelter', args: '{}' }] }], live: { mode: 'run', c: 1, s: 1 } }));
+  t += 20_000;
+  p.term(cleanTerm({ lines: [{ k: 'ok', t: 'ok  climbed down to the ground (19 s)', s: 1, shut: 1 }, { k: 'reply', t: '< 1. shelter {}: ok: closed itself in', rid: 1 }], live: { mode: 'idle' } }));
+  t += 1000;
+  p.render(t);
+  let h = p.hud(t);
+  assert.deepEqual(h.state.sheltered, { since: '1:00' });
+  assert.deepEqual(h.qa.problems, []);
+  // with a new-goal toast at once: no overlap
+  p.term(cleanTerm({ goal: { key: 'custom', title: 'kill 3 pigs', text: 'kill 3 pigs', list: [{ k: 'kill_pig', t: 'pigs killed', done: 0, of: 3, atS: null }] } }));
+  p.term(cleanTerm({ goal: { key: 'custom', title: 'kill 10 pigs and collect 64 cobblestone', text: 'x', list: [{ k: 'kill_pig', t: 'pigs killed', done: 0, of: 10, atS: null }] } }));
+  t += 1000;
+  p.render(t);
+  assert.deepEqual(p.hud(t).qa.problems, []);
+  t += 5000;
+  p.term(cleanTerm({ lines: [{ k: 'call', t: '> play', tool: 'play', words: 'Dawn', of: 1, rid: 2, raw: '{}', steps: [{ say: 'Mine 4 oak logs', raw: 'collect oak_log 4' }] }] }));
+  assert.equal(p.hud(t).state.sheltered, null, 'out with the next play call');
+});

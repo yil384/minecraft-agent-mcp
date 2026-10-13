@@ -1,0 +1,11 @@
+# a view from high above, looking down at the shelter: 12 to 32 blocks straight up (a little to the side first), its
+# line down through open air only (not through leaves: the camera draws them opaque, so a canopy hid the shelter)
+execute as @a[tag=agentcam_target,limit=1] at @s positioned ~3 ~10 ~3 run function agentcam:good
+execute if score #g agentcam_y matches 0 as @a[tag=agentcam_target,limit=1] at @s positioned ~ ~12 ~ run function agentcam:good
+execute if score #g agentcam_y matches 0 as @a[tag=agentcam_target,limit=1] at @s positioned ~ ~16 ~ run function agentcam:good
+execute if score #g agentcam_y matches 0 as @a[tag=agentcam_target,limit=1] at @s positioned ~ ~24 ~ run function agentcam:good
+execute if score #g agentcam_y matches 0 as @a[tag=agentcam_target,limit=1] at @s positioned ~ ~32 ~ run function agentcam:good
+execute if score #g agentcam_y matches 1 run function agentcam:to_spot
+execute if score #g agentcam_y matches 1 run scoreboard players set #on agentcam_y 2
+execute if score #g agentcam_y matches 1 run scoreboard players set #hv agentcam_y 1
+execute if score #g agentcam_y matches 1 run scoreboard players set #f agentcam_y 1

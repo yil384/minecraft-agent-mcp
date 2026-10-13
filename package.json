@@ -1,0 +1,31 @@
+{
+  "name": "minecraft-agent-mcp",
+  "version": "0.1.0",
+  "private": true,
+  "description": "A self-hosted MCP server that lets any MCP client play Minecraft: Java Edition through a bot, with an optional live view (a local watch page, or your own Facebook live). Not an official Minecraft product.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "test": "node --test \"test/*.test.js\"",
+    "start": "node src/index.js",
+    "demo": "node src/index.js --fake-bot",
+    "self-check": "node scripts/self-check.mjs",
+    "camera": "node scripts/stream.mjs"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.1",
+    "canvas": "^3.2.3",
+    "hls.js": "1.7.3",
+    "minecraft-data": "^3.117.0",
+    "mineflayer": "4.39.0",
+    "mineflayer-collectblock": "^1.6.0",
+    "mineflayer-pathfinder": "^2.4.5",
+    "zod": "^4.6.5"
+  },
+  "allowScripts": {
+    "canvas@3.2.3": true
+  }
+}
