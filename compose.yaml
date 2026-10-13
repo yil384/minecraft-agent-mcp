@@ -1,0 +1,111 @@
+# minecraft-agent-mcp on one machine: ./setup.sh (or docker compose up -d --build once .env is set; see README.md).
+#
+#   paper   the Minecraft server (Paper 1.21.4), offline mode, listening on 127.0.0.1 inside this stack only
+#   agent   the MCP endpoint and the watch page (the one published port), one bot process per game
+#   camera  the live view's camera (profile "camera": LIVE_VIEW=local or facebook)
+#   tunnel  a Cloudflare quick tunnel to the agent (profile "tunnel"; a public https URL for cloud MCP clients)
+#
+# All four share one network namespace, the paper service's: they talk over 127.0.0.1, so the offline-mode server is
+# reachable from nothing outside the stack. The only published port is the agent's, on 127.0.0.1 of this machine.
+# Every container runs as your own user (RUN_UID, RUN_GID from setup), so ./data stays yours, with no capabilities and
+# no way to gain privileges. The project's name is COMPOSE_PROJECT_NAME (./setup.sh --name; a second copy on one
+# machine needs its own name and WEB_PORT). To stop everything: ./setup.sh --stop.
+name: ${COMPOSE_PROJECT_NAME:-mcagent}
+
+x-run-as: &run-as
+  user: "${RUN_UID:-1000}:${RUN_GID:-1000}"
+  cap_drop: [ ALL ]
+  security_opt: [ "no-new-privileges:true" ]
+
+services:
+  paper:
+    build: { context: ., dockerfile: docker/Dockerfile.paper }
+    <<: *run-as
+    restart: unless-stopped
+    environment:
+      MINECRAFT_EULA: ${MINECRAFT_EULA:-false}
+      SEED: ${PAPER_SEED:-}
+      DIFFICULTY: ${PAPER_DIFFICULTY:-normal}
+      DAYLIGHT: ${PAPER_DAYLIGHT:-cycle}
+      NETHER: ${PAPER_NETHER:-true}
+      BORDER: ${PAPER_BORDER:-20000}
+      MEMORY: ${PAPER_MEMORY:-3G}
+      MOTD: ${SERVER_NAME:-Agent game server}
+      BSTATS: ${PAPER_BSTATS:-false}
+    volumes: [ "./data/world:/data", "console:/console" ]
+    # the agent's port, published by the namespace's owner
+    ports: [ "${WEB_BIND:-127.0.0.1}:${WEB_PORT:-8787}:8787" ]
+    stop_grace_period: 60s
+
+  agent:
+    build: { context: ., dockerfile: docker/Dockerfile.agent }
+    <<: *run-as
+    restart: unless-stopped
+    init: true # reaps what a bot's process leaves behind
+    network_mode: "service:paper"
+    depends_on: [ paper ]
+    env_file: [ .env ]
+    environment:
+      MC_HOST: 127.0.0.1
+      MC_CONSOLE: /console/console.in
+      MC_WHITELIST: "true"
+      BODY: mineai
+      MINEAI_DATA_DIR: /mineai-data
+      WEB_HOST: 0.0.0.0
+      WEB_PORT: "8787"
+      # connections through the published port come from the bridge's gateway: this machine (or WEB_BIND's network)
+      WEB_LOCAL_PEERS: gateway
+      # links when a request does not say where it came from: the host's side of the published port
+      WEB_LOCAL_URL: http://${WEB_BIND:-127.0.0.1}:${WEB_PORT:-8787}
+      LOG_DIR: /logs
+    volumes: [ "./data/logs:/logs", "console:/console", "./data/mineai:/mineai-data" ]
+
+  camera:
+    profiles: [ camera ]
+    build: { context: ., dockerfile: docker/Dockerfile.camera, args: { GPU: "${CAMERA_GPU_BUILD:-0}" } }
+    platform: linux/amd64
+    <<: *run-as
+    restart: unless-stopped
+    init: true
+    network_mode: "service:paper"
+    depends_on: [ agent ]
+    env_file: [ .env ]
+    environment:
+      MC_HOST: 127.0.0.1
+      MC_CONSOLE: /console/console.in
+      STREAM_ROLE: camera
+      # the agent's secrets are not the camera's business (the camera only shares STREAM_SERVICE_TOKEN with it)
+      MCP_ACCESS_KEY: ""
+      WATCH_KEY: ""
+      WEB_ADMIN_TOKEN: ""
+      WEB_PROXY_SECRET: ""
+      CAMERA_AUTH_DIR: /auth
+      FB_TOKEN_FILE: /secrets/fb-token
+      FB_STATE_FILE: /logs/fb-live-state.json
+      LOG_DIR: /logs
+    volumes:
+      - ./data/logs:/logs
+      - console:/console
+      - ./data/camera-auth:/auth
+      # the Minecraft client, downloaded from Mojang at the camera's first start (after the EULA)
+      - ./data/minecraft-client:/opt/mc
+      - ./secrets:/secrets:ro
+    tmpfs: [ "/camera:size=1g,mode=1777,exec" ]
+    cpus: ${CAMERA_CPUS:-6}
+    mem_limit: ${CAMERA_MEM:-3g}
+    pids_limit: 1024
+    shm_size: 256m
+
+  tunnel:
+    profiles: [ tunnel ]
+    # cloudflared 2026.9.3; its metrics at 127.0.0.1:20241 name the quick tunnel's address (/quicktunnel)
+    image: cloudflare/cloudflared:2026.9.3@sha256:072c067d25ccbe61d46e18f0d0723255f2bb5304f7317caa95b27031520ff92c
+    restart: unless-stopped
+    cap_drop: [ ALL ]
+    security_opt: [ "no-new-privileges:true" ]
+    network_mode: "service:paper"
+    depends_on: [ agent ]
+    command: [ "tunnel", "--no-autoupdate", "--metrics", "127.0.0.1:20241", "--url", "http://127.0.0.1:8787" ]
+
+volumes:
+  console: {}

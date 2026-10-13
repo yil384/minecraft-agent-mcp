@@ -1,0 +1,11 @@
+# The camera on an NVIDIA GPU (OpenGL through VirtualGL's EGL back end) instead of the CPU, which saves about 3-4 cores.
+# Needs the NVIDIA Container Toolkit and a driver whose OpenGL has framebuffer objects (consumer GeForce cards do; some
+# data-centre GPUs do not). Use it with the main file:
+#   CAMERA_GPU_BUILD=1 docker compose -f compose.yaml -f compose.gpu.yaml up -d --build
+# and CAMERA_GL=gpu in .env.
+services:
+  camera:
+    build: { args: { GPU: "1" } }
+    environment:
+      CAMERA_GL: gpu
+    gpus: all

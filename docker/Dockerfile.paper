@@ -1,0 +1,23 @@
+# docker/Dockerfile.paper - Paper 1.21.4 (build 232) for the bots: offline mode, listening on 127.0.0.1 inside the
+# stack's shared network namespace only (compose.yaml), console through a FIFO. Paper is downloaded here from PaperMC's
+# own server and checked against its SHA-256; nothing of Paper or Minecraft is in this repository or in any image we
+# publish (we publish none). Paper downloads Mojang's server jar at its first start, and only once you have accepted
+# the Minecraft EULA yourself (MINECRAFT_EULA=true; docker/paper-entry.sh refuses to start otherwise).
+FROM eclipse-temurin:21-jre@sha256:cff19e6215689161eb6162c11b86b0c60ddf802164f2eaf48d570f8fb79a36c5
+LABEL org.opencontainers.image.title="Agent game server for Minecraft: Paper" org.opencontainers.image.licenses="GPL-3.0-only (Paper)"
+ARG PAPER_URL=https://fill-data.papermc.io/v1/objects/5ee4f542f628a14c644410b08c94ea42e772ef4d29fe92973636b6813d4eaffc/paper-1.21.4-232.jar
+ARG PAPER_SHA256=5ee4f542f628a14c644410b08c94ea42e772ef4d29fe92973636b6813d4eaffc
+RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates \
+ && mkdir -p /opt/paper \
+ && curl -fsSL --retry 3 -o /opt/paper/paper.jar "$PAPER_URL" \
+ && echo "$PAPER_SHA256  /opt/paper/paper.jar" | sha256sum -c - \
+ && apt-get purge -y curl && apt-get autoremove -y && rm -rf /var/lib/apt/lists/* \
+ && mkdir -p /console && chmod 1777 /console
+COPY docker/paper-entry.sh /opt/paper/entry.sh
+# the camera's datapack (night vision, the over-the-shoulder view, the shelter seen from outside), copied into the
+# world at every start by paper-entry.sh
+COPY docker/datapack /opt/paper/datapacks
+RUN chmod 755 /opt/paper/entry.sh
+WORKDIR /data
+ENV HOME=/data
+CMD ["/opt/paper/entry.sh"]

@@ -1,0 +1,40 @@
+# docker/Dockerfile.agent - the agent: the web port (the MCP endpoint, the watch page), the games and their bots. Each
+# bot is a Mine AI MCP host of its own (BODY=mineai): their MIT-licensed runtime at the commit pinned in
+# mineai/UPSTREAM.json, with our patches (mineai/patches), cloned, patched, installed from its own lockfile, type-checked
+# and tested here at build time (mineai/fetch-and-patch.sh), run with Bun (downloaded here, SHA-256 checked).
+# node_modules keeps the game data of MC_VERSION only (docker/slim-modules.mjs): about 270 MB instead of 950.
+# Build it yourself (./setup.sh, or docker compose build); do not publish the image.
+FROM node:22-bookworm-slim@sha256:c3de60bf2f9dd0ac6370e6117950ff62d6e339527e7472301c9c78a017978392
+LABEL org.opencontainers.image.title="Agent game server for Minecraft: agent" org.opencontainers.image.licenses="Apache-2.0"
+ARG MC_VERSION=1.21.4
+WORKDIR /app
+COPY package.json package-lock.json ./
+COPY docker/slim-modules.mjs ./docker/slim-modules.mjs
+RUN npm ci --omit=dev && node docker/slim-modules.mjs "$MC_VERSION" node_modules && npm cache clean --force
+# The Mine AI MCP runtime, before src/ is copied: a change to our code reuses this layer; only a change of the pin or
+# the patches builds it again. Bun's release zips are checked against the SHA-256 of its release's SHASUMS256.txt.
+ARG BUN_VERSION=1.4.2
+ARG BUN_SHA256_X64=36368faef7527875d5ffa52e53cd48021741f2a83eb6208a8dd64068d422a913
+ARG BUN_SHA256_ARM64=54328bbc2d9c8e0c9f892c544d66c57a83b84139e34909e5ee81758f1ac8fda7
+ARG TARGETARCH
+COPY mineai ./mineai
+COPY scripts/mineai-fetch.mjs ./scripts/mineai-fetch.mjs
+RUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates curl unzip \
+ && case "${TARGETARCH:-amd64}" in \
+      amd64) BUN_ZIP=bun-linux-x64; BUN_SHA256="$BUN_SHA256_X64" ;; \
+      arm64) BUN_ZIP=bun-linux-aarch64; BUN_SHA256="$BUN_SHA256_ARM64" ;; \
+      *) echo "no Bun build for $TARGETARCH" >&2; exit 1 ;; \
+    esac \
+ && curl -fsSL --retry 3 -o /tmp/bun.zip "https://github.com/oven-sh/bun/releases/download/bun-v${BUN_VERSION}/${BUN_ZIP}.zip" \
+ && echo "$BUN_SHA256  /tmp/bun.zip" | sha256sum -c - \
+ && unzip -q /tmp/bun.zip -d /tmp && mv "/tmp/${BUN_ZIP}/bun" /usr/local/bin/bun && rm -rf /tmp/bun.zip "/tmp/${BUN_ZIP}" \
+ && BUN=/usr/local/bin/bun bash mineai/fetch-and-patch.sh /opt/mine-ai-mcp \
+ && node docker/slim-modules.mjs "$MC_VERSION" /opt/mine-ai-mcp/node_modules \
+ && apt-get purge -y git curl unzip && apt-get autoremove -y && rm -rf /var/lib/apt/lists/* /root/.bun/install/cache \
+ && mkdir -p /console && chmod 1777 /console
+COPY src ./src
+COPY scripts ./scripts
+ENV BODY=mineai MINEAI_DIR=/opt/mine-ai-mcp MINEAI_RUNTIME=bun MINEAI_EXEC=/usr/local/bin/bun \
+    WEB_HOST=0.0.0.0 WEB_PORT=8787 LOG_DIR=/logs NODE_ENV=production HOME=/tmp
+EXPOSE 8787
+CMD ["node", "src/index.js"]

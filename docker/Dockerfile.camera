@@ -1,0 +1,56 @@
+# docker/Dockerfile.camera - the camera of the live view (LIVE_VIEW=local or facebook; compose profile "camera"): a
+# Minecraft: Java Edition 1.21.4 client on an X server (Xvfb) that rides along with a bot as a spectator, filmed by
+# ffmpeg (x11grab) with the HUD drawn by node-canvas, driven by `scripts/stream.mjs --serve` (src/camera.js).
+#
+# No Mojang file is in this image: the client, its libraries and assets are downloaded from Mojang at the camera's
+# first start, into ./data/minecraft-client on your machine, and only once you have accepted the Minecraft EULA
+# (docker/camera-entry.sh, docker/camera/install-client.mjs: every file SHA-1 checked from the pinned version file;
+# the Fabric loader and the client mods SHA-512 checked). The camera signs in with your own Minecraft account
+# (scripts/camera-login.mjs); its tokens live in ./data/camera-auth, never in the image.
+#
+# OpenGL runs on the CPU through Mesa llvmpipe (CAMERA_GL=cpu, the default), or with --build-arg GPU=1 on an NVIDIA GPU
+# through VirtualGL's EGL back end (CAMERA_GL=gpu, compose.gpu.yaml; VirtualGL's .deb is SHA-256 checked). linux/amd64
+# only: Mojang ships x86-64 Linux natives for 1.21.4. Build it yourself; do not publish the image.
+
+# the launcher class that hands the client its token from the environment, not the command line
+FROM eclipse-temurin:21-jdk@sha256:3e3c176ffed168beb42c607be9bc1639b466cf00261a0fb04425562c9d0c5c2b AS javac
+COPY docker/camera/CameraMain.java /src/CameraMain.java
+RUN javac --release 21 -d /out /src/CameraMain.java && test -f /out/agent/camera/CameraMain.class
+
+FROM node:22-bookworm-slim@sha256:c3de60bf2f9dd0ac6370e6117950ff62d6e339527e7472301c9c78a017978392
+LABEL org.opencontainers.image.title="Agent game server for Minecraft: camera" org.opencontainers.image.licenses="Apache-2.0"
+ARG GPU=0
+ARG VGL_VERSION=3.1.5
+ARG VGL_SHA256=df3f7788ce41b182a47c0d298e5cd6d2d63579522cb41825970b7726e825485e
+# Xvfb + xdotool (the F1 key), ffmpeg (x11grab, libx264, aac, rtmps, hls), glvnd + Mesa (llvmpipe), the X libraries
+# GLFW loads, PulseAudio (the game's sound), unzip (the client's natives, at its install)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      xvfb xdotool x11-utils ffmpeg fonts-dejavu-core ca-certificates procps curl unzip pulseaudio pulseaudio-utils \
+      libgl1 libegl1 libgles2 libopengl0 libglx-mesa0 libegl-mesa0 libgl1-mesa-dri libglu1-mesa \
+      libxtst6 libxv1 libxrandr2 libxinerama1 libxcursor1 libxi6 libxxf86vm1 libxext6 libxrender1 \
+ && if [ "$GPU" = "1" ]; then \
+      curl -fsSL --retry 3 -o /tmp/vgl.deb "https://github.com/VirtualGL/virtualgl/releases/download/${VGL_VERSION}/virtualgl_${VGL_VERSION}_amd64.deb" \
+      && echo "$VGL_SHA256  /tmp/vgl.deb" | sha256sum -c - \
+      && apt-get install -y --no-install-recommends /tmp/vgl.deb && rm -f /tmp/vgl.deb \
+      && mkdir -p /usr/share/glvnd/egl_vendor.d \
+      && printf '{"file_format_version":"1.0.0","ICD":{"library_path":"libEGL_nvidia.so.0"}}\n' > /usr/share/glvnd/egl_vendor.d/10_nvidia.json; \
+    fi \
+ && apt-get purge -y curl && apt-get autoremove -y && rm -rf /var/lib/apt/lists/* \
+ && mkdir -p /tmp/.X11-unix /camera /opt/mc /console && chmod 1777 /tmp/.X11-unix /camera /opt/mc /console
+COPY --from=eclipse-temurin:21-jre@sha256:cff19e6215689161eb6162c11b86b0c60ddf802164f2eaf48d570f8fb79a36c5 /opt/java/openjdk /opt/java/openjdk
+ENV JAVA_HOME=/opt/java/openjdk PATH=/opt/java/openjdk/bin:/opt/VirtualGL/bin:$PATH
+COPY --from=javac /out /opt/camera-main
+WORKDIR /app
+COPY package.json package-lock.json ./
+RUN npm ci --omit=dev && npm cache clean --force
+COPY src ./src
+COPY scripts ./scripts
+# the HUD's icons, fonts (OFL) and the CC0 music bed (assets/ui/CREDITS.txt)
+COPY assets ./assets
+COPY docker/camera ./docker/camera
+COPY docker/camera-entry.sh /usr/local/bin/camera-entry.sh
+# runs as your own uid (compose `user:`), so the account's token files in ./data/camera-auth stay yours; HOME is a tmpfs
+ENV LOG_DIR=/logs NODE_ENV=production STREAM_ROLE=camera STREAM_SERVICE_PORT=7862 \
+    CAMERA_MC_DIR=/opt/mc CAMERA_MAIN_DIR=/opt/camera-main CAMERA_HOME=/camera CAMERA_AUTH_DIR=/auth HOME=/camera \
+    NVIDIA_DRIVER_CAPABILITIES=graphics,utility
+CMD ["/usr/local/bin/camera-entry.sh"]
