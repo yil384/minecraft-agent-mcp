@@ -95,20 +95,20 @@ const short = (s, n = 170) => (s.length > n ? `${s.slice(0, n - 3)}...` : s);
  * Run the checks against `base`. Returns the exit code: 0 passed, 1 a check failed (said through `print`), 2 refused.
  * @param {{base: string, key?: string, game?: boolean, minutes?: number, print?: (line: string) => void}} opts
  */
-export async function runCheck({ base, key = '', game: playGame = true, minutes = 8, print = console.log } = {}) {
+export async function runCheck({ base, key = '', game: playGame = true, minutes = 8, print = console.log, pause = sleep } = {}) {
   base = String(base ?? '').replace(/\/+$/, '');
   try { new URL(base); } catch { print(`refused: not a URL: ${base}`); return 2; }
   if (key && !/^[A-Za-z0-9_-]{16,128}$/.test(key)) { print('refused: the key is not an MCP access key'); return 2; }
   if (!(minutes > 0 && minutes <= 30)) { print('refused: minutes must be more than 0 and at most 30'); return 2; }
   try {
-    return await checks(base, key, playGame, minutes, print);
+    return await checks(base, key, playGame, minutes, print, pause);
   } catch (e) {
     print(`self-check: FAIL: ${e instanceof CheckFailed ? e.message : e.stack ?? e}`);
     return 1;
   }
 }
 
-async function checks(base, key, playGame, minutes, print) {
+async function checks(base, key, playGame, minutes, print, pause) {
   const deadline = Date.now() + minutes * 60_000;
   const t0 = Date.now();
   const at = () => `[${String(Math.round((Date.now() - t0) / 1000)).padStart(4)} s]`;
@@ -149,16 +149,18 @@ async function checks(base, key, playGame, minutes, print) {
     say(`/mcp -> initialized (${sv?.name ?? '?'} ${sv?.version ?? ''}), tools: ${tools.join(', ')}`);
     if (!playGame) { say('PASS (no game)'); return 0; }
 
-    // 3. a game: start (waiting while Paper boots), find wood, then the wooden pickaxe route
+    // 3. a game: start (waiting while Paper boots: its first start makes the world, longer than start_game waits, so
+    // SERVER_STARTING is tried again after the time it names), find wood, then the wooden pickaxe route
     let r;
     let wood = null;
     for (let spot = 1; !wood; spot++) {
       for (;;) {
         r = await call('start_game', { adult: true });
         if (!r.error) break;
-        if (!/could not start/.test(r.text) || left() < 120_000) fail(`start_game: ${short(r.text.split('\n')[0])}`);
-        say(`start_game: ${short(r.text.split('\n')[0], 120)}; trying again in 5 s`);
-        await sleep(5_000);
+        const again = r.data?.code === 'SERVER_STARTING' ? Math.min(Math.max(Number(r.data.retryAfterS) || 15, 1), 60) : /could not start/.test(r.text) ? 5 : 0;
+        if (!again || left() < 120_000) fail(`start_game: ${short(r.text.split('\n')[0])}`);
+        say(`start_game: ${short(r.text.split('\n')[0], 120)}; trying again in ${again} s`);
+        await pause(again * 1000);
       }
       game = /(?:New|Resumed) game (\w+)/.exec(r.text)?.[1] ?? '?';
       if (/still joining/.test(r.text)) r = await call('get_state');

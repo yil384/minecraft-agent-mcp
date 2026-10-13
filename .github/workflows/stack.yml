@@ -1,5 +1,6 @@
 # The whole stack with Docker Compose on a fresh Linux machine, the way a user runs it: ./setup.sh in mode off (Paper,
-# the agent, a scripted test game over MCP), then checks of the published port, then ./setup.sh --stop. Paper downloads
+# the agent), the scripted test game over MCP that setup.sh runs (here a step of its own, so a failed game fails the
+# run: setup.sh only notes it), then checks of the published port, then ./setup.sh --stop. Paper downloads
 # Mojang's server at its first start, which needs the Minecraft EULA accepted: this workflow never runs by itself.
 # Start it by hand (Actions, "stack", Run workflow) and accept the EULA there yourself (https://aka.ms/MinecraftEULA).
 name: stack
@@ -20,8 +21,10 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-      - name: ./setup.sh --mode off (build, start, a scripted test game)
-        run: ./setup.sh --mode off --accept-eula --port 18787 --name stackci -y < /dev/null
+      - name: ./setup.sh --mode off (build, start)
+        run: ./setup.sh --mode off --accept-eula --port 18787 --name stackci --no-check -y < /dev/null
+      - name: the scripted test game over MCP (setup.sh's check, right after the first start)
+        run: docker compose exec -T agent node scripts/self-check.mjs http://127.0.0.1:8787 --minutes 8
       - name: the published port, the key, host names, the status
         run: |
           KEY=$(sed -n 's/^MCP_ACCESS_KEY=//p' .env)
