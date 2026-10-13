@@ -1,0 +1,32 @@
+minecraft-agent-mcp
+Copyright 2026 The minecraft-agent-mcp authors
+
+This product is licensed under the Apache License, Version 2.0 (see LICENSE), except for the parts listed below, which
+keep their own licences.
+
+mineai/patches/
+  Patches to Mine AI MCP (https://github.com/aibengineering/mine-ai-mcp), released under the MIT License
+  (see mineai/LICENSE).
+  Copyright (c) 2026 AI Bengineering (the code the patches modify and quote).
+  Copyright (c) 2026 The minecraft-agent-mcp authors (the changes).
+  Mine AI MCP itself is not included: it is downloaded at build time at the commit pinned in mineai/UPSTREAM.json.
+
+assets/ui/fonts/Inter-*.ttf
+  Inter, Copyright (c) 2016 The Inter Project Authors (https://github.com/rsms/inter).
+  SIL Open Font License 1.1 (assets/ui/fonts/Inter-OFL.txt).
+
+assets/ui/fonts/JetBrainsMono-*.ttf
+  JetBrains Mono, Copyright 2020 The JetBrains Mono Project Authors (https://github.com/JetBrains/JetBrainsMono).
+  SIL Open Font License 1.1 (assets/ui/fonts/JetBrainsMono-OFL.txt).
+
+assets/ui/music/etirwer.m4a
+  "Etirwer" by Kistol (https://opengameart.org/content/etirwer), CC0 1.0. Re-encoded and loudness-levelled. Credit is
+  not required and is given with thanks.
+
+This repository contains no Minecraft code or assets and no Paper, Fabric, Sodium or other mod binaries. The setup
+downloads them on the user's machine, checks each against a pinned hash, and each stays under its own licence (see
+README.md, "Third-party software").
+
+NOT AN OFFICIAL MINECRAFT PRODUCT. NOT APPROVED BY OR ASSOCIATED WITH MOJANG OR MICROSOFT.
+Not affiliated with, endorsed by or sponsored by Meta Platforms, Inc., Mojang Studios or Microsoft.
+Minecraft is a trademark of Mojang Synergies AB. Facebook is a trademark of Meta Platforms, Inc.
