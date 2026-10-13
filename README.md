@@ -148,7 +148,7 @@ on your server.
 | --- | --- |
 | Claude Code | `claude mcp add --transport http minecraft http://127.0.0.1:8787/mcp/<key>` |
 | Claude Desktop | Local: add the stdio bridge to `claude_desktop_config.json` (below). Remote: Settings, Connectors, Add custom connector, with the public URL ([Making the URL public](#making-the-url-public)): custom connectors connect from the cloud, so `127.0.0.1` does not work there |
-| muse.ai | Needs the public URL. In a chat, ask it to build a custom integration (an MCP connector) for `https://<your public host>/mcp/<key>` (streamable HTTP, no sign-in). Its preview panel can play a Facebook live (`LIVE_VIEW=facebook`) but not your local watch page: open that link in a browser tab |
+| muse.ai | Needs the public URL. In a chat, ask it to build a custom integration (an MCP connector) for `https://<your public host>/mcp/<key>` (streamable HTTP, no sign-in). Its preview panel can play a Facebook live (`LIVE_VIEW=facebook`) but not your local watch page: open that link in a browser tab. muse.ai is a Meta product; this project is not affiliated with, endorsed by or sponsored by Meta |
 | Cursor, VS Code, Windsurf and other IDE clients | An MCP server entry with `"url": "http://127.0.0.1:8787/mcp/<key>"` (streamable HTTP) |
 | Clients that only start local (stdio) servers | `node scripts/stdio-bridge.mjs http://127.0.0.1:8787/mcp/<key>`: the bridge runs on the machine of the client (needs Node 22+ there and `npm ci` in a copy of this folder) |
 | Any other MCP client | The URL above; it gets the server's instructions at `initialize`, so one line from you is enough |
@@ -297,6 +297,6 @@ Running without Docker (development, or a Mac without Docker): see
 
 ## Licence
 
-Apache License 2.0 ([LICENSE](LICENSE)), except: the patches to Mine AI MCP in `mineai/patches` are MIT
+Copyright 2026 Picasso Lab, UC San Diego. Apache License 2.0 ([LICENSE](LICENSE)), except: the patches to Mine AI MCP in `mineai/patches` are MIT
 ([mineai/LICENSE](mineai/LICENSE)); the fonts in `assets/ui/fonts` are under the SIL Open Font License 1.1; the music
 bed is CC0 1.0. See [NOTICE](NOTICE) and [assets/ui/CREDITS.txt](assets/ui/CREDITS.txt).

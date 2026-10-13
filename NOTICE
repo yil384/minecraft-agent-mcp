@@ -1,5 +1,5 @@
 minecraft-agent-mcp
-Copyright 2026 The minecraft-agent-mcp authors
+Copyright 2026 Picasso Lab, UC San Diego
 
 This product is licensed under the Apache License, Version 2.0 (see LICENSE), except for the parts listed below, which
 keep their own licences.
@@ -8,7 +8,7 @@ mineai/patches/
   Patches to Mine AI MCP (https://github.com/aibengineering/mine-ai-mcp), released under the MIT License
   (see mineai/LICENSE).
   Copyright (c) 2026 AI Bengineering (the code the patches modify and quote).
-  Copyright (c) 2026 The minecraft-agent-mcp authors (the changes).
+  Copyright (c) 2026 Picasso Lab, UC San Diego (the changes).
   Mine AI MCP itself is not included: it is downloaded at build time at the commit pinned in mineai/UPSTREAM.json.
 
 assets/ui/fonts/Inter-*.ttf
