@@ -169,7 +169,8 @@ async function checks(base, key, playGame, minutes, print, pause) {
       wood = woodNear(r.text);
       const inv = inventoryOf(r.text);
       if (Object.keys(inv).length) fail(`game ${game} did not start with an empty inventory: ${JSON.stringify(inv)}`);
-      say(`start_game -> game ${game} at ${pos}, empty inventory, ${wood ? `${wood} logs nearby` : 'no logs within reach'}`);
+      const near = lastMatch(r.text, /^nearby blocks \(within \d+\): (.*)$/gm)?.[1] ?? '(no nearby blocks line)';
+      say(`start_game -> game ${game} at ${pos}, empty inventory, ${wood ? `${wood} logs nearby` : `no logs within reach (nearby: ${short(near.replace(/ \(nearest [^)]*\)/g, ''), 140)})`}`);
       if (wood) break;
       if (spot >= 3) fail('three spots in a row had no logs within reach');
       await call('end_game');
