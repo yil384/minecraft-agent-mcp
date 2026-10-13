@@ -1,0 +1,56 @@
+# The test suite on every push and pull request (job test): no Docker, no Minecraft, no account, no network beyond the package
+# registry (the Graph API, the camera and the Minecraft server are all test doubles). ffmpeg is installed so the
+# end-to-end video tests (HLS and RTMP to a local sink) run too.
+name: test
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+          cache: npm
+      - name: ffmpeg for the video tests
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
+      - run: npm ci
+      - run: npm test
+
+  # The agent's image, built and started the way compose.yaml starts it (as an unprivileged user, no capabilities): the
+  # runtime pin check must pass inside the image (no git there, the runtime owned by root), the port must answer, the
+  # MCP endpoint must take its key, and an unknown host name must be refused. No Minecraft server, no EULA, no account.
+  image:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: compose.yaml parses
+        run: cp .env.example .env && docker compose config -q && docker compose --profile camera --profile tunnel config -q
+      - name: build the agent image (the Mine AI runtime is cloned, patched, type-checked and tested here)
+        run: docker build -f docker/Dockerfile.agent -t agent-ci .
+      - name: the runtime pin check, as an unprivileged user
+        run: docker run --rm --user 1000:1000 --cap-drop ALL --security-opt no-new-privileges:true agent-ci node scripts/mineai-fetch.mjs /opt/mine-ai-mcp --check
+      - name: start the agent and talk to it
+        run: |
+          KEY=ci0123456789abcdef0123456789abcd
+          docker run -d --name agent-ci --user 1000:1000 --cap-drop ALL --security-opt no-new-privileges:true \
+            -e MCP_ACCESS_KEY=$KEY -e WEB_LOCAL_PEERS=gateway -e WEB_LOCAL_URL=http://127.0.0.1:18787 -e LOG_DIR=/tmp/logs \
+            -p 127.0.0.1:18787:8787 agent-ci
+          for i in $(seq 1 60); do curl -fsS -o /dev/null http://127.0.0.1:18787/ && break; sleep 2; done
+          curl -fsS http://127.0.0.1:18787/ | grep -q 'NOT AN OFFICIAL MINECRAFT SERVICE'
+          code=$(curl -s -o /dev/null -w '%{http_code}' -X POST -H 'content-type: application/json' -H 'accept: application/json, text/event-stream' \
+            --data '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"ci-smoke","version":"1"}}}' \
+            http://127.0.0.1:18787/mcp/$KEY)
+          test "$code" = 200
+          test "$(curl -s -o /dev/null -w '%{http_code}' -X POST http://127.0.0.1:18787/mcp)" = 401
+          test "$(curl -s -o /dev/null -w '%{http_code}' -H 'host: rebind.example' http://127.0.0.1:18787/)" = 421
+          docker logs agent-ci 2>&1 | tail -20
+          docker rm -f agent-ci
+      - name: build the Paper image (Paper's jar SHA-256 checked; Mojang's server is only fetched at a start with the EULA accepted)
+        run: docker build -f docker/Dockerfile.paper -t paper-ci .

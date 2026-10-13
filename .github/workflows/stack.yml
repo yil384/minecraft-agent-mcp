@@ -1,0 +1,42 @@
+# The whole stack with Docker Compose on a fresh Linux machine, the way a user runs it: ./setup.sh in mode off (Paper,
+# the agent, a scripted test game over MCP), then checks of the published port, then ./setup.sh --stop. Paper downloads
+# Mojang's server at its first start, which needs the Minecraft EULA accepted: this workflow never runs by itself.
+# Start it by hand (Actions, "stack", Run workflow) and accept the EULA there yourself (https://aka.ms/MinecraftEULA).
+name: stack
+on:
+  workflow_dispatch:
+    inputs:
+      minecraft_eula:
+        description: 'I have read and accept the Minecraft EULA (https://aka.ms/MinecraftEULA) for this run'
+        type: choice
+        options: [ 'no', 'yes' ]
+        default: 'no'
+permissions:
+  contents: read
+jobs:
+  stack:
+    if: ${{ inputs.minecraft_eula == 'yes' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: ./setup.sh --mode off (build, start, a scripted test game)
+        run: ./setup.sh --mode off --accept-eula --port 18787 --name stackci -y < /dev/null
+      - name: the published port, the key, host names, the status
+        run: |
+          KEY=$(sed -n 's/^MCP_ACCESS_KEY=//p' .env)
+          test "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:18787/)" = 200
+          test "$(curl -s -o /dev/null -w '%{http_code}' -X POST http://127.0.0.1:18787/mcp)" = 401
+          test "$(curl -s -o /dev/null -w '%{http_code}' -H 'host: rebind.example' http://127.0.0.1:18787/)" = 421
+          curl -fsS http://127.0.0.1:18787/ | grep -q 'http://127.0.0.1:18787/mcp/'
+          code=$(curl -s -o /dev/null -w '%{http_code}' -X POST -H 'content-type: application/json' -H 'accept: application/json, text/event-stream' \
+            --data '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"stack-smoke","version":"1"}}}' \
+            "http://127.0.0.1:18787/mcp/$KEY")
+          test "$code" = 200
+          ./setup.sh --status < /dev/null
+      - name: logs
+        if: always()
+        run: docker compose logs --tail 80 agent paper || true
+      - name: ./setup.sh --stop
+        if: always()
+        run: ./setup.sh --stop < /dev/null
