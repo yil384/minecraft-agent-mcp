@@ -597,7 +597,8 @@ test('mineai kill switch: stop cancels their running action; end closes every ho
 test('mineai switch: BODY=mineai in startAgent gives guests Mine AI bodies and the extra skills; ours is the default', async () => {
   const dir = tmp('mineai-agent-');
   const hosts = fakeHosts(() => ({ inventory: { shield: 1 } }));
-  const agent = await startAgent({ config: loadConfig({ WEB_HOST: '127.0.0.1', WEB_PORT: '0', LOG_DIR: dir, BODY: 'mineai', MINEAI_DIR: dir }), hosts, print: () => {}, loopStatsMs: 0 });
+  // no Minecraft server here: start_game must not ping one (a server someone runs on 25565 must not decide this test)
+  const agent = await startAgent({ config: loadConfig({ WEB_HOST: '127.0.0.1', WEB_PORT: '0', LOG_DIR: dir, BODY: 'mineai', MINEAI_DIR: dir }), hosts, print: () => {}, loopStatsMs: 0, serverReady: null });
   const c = await mcpClient(agent.url);
   try {
     const play = (await c.listTools()).tools.find((t) => t.name === 'play');
