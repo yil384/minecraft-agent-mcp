@@ -276,14 +276,9 @@ camera_login() {
   fi
   if ! compose run --rm --no-deps camera node scripts/camera-login.mjs --dir /auth ${FORCE_LOGIN:+--force}; then
     say ""
-    say "If Microsoft refused the device code ('first party application ... not permitted to consent'):"
-    say "  - the better fix: your own Azure app: CAMERA_MSA_CLIENT_ID in .env (README, Troubleshooting), then"
-    say "    ./setup.sh --camera-login"
-    say "  - or, opt-in and at your own risk, the Minecraft launcher's sign-in (it uses the official launcher's client"
-    say "    id, which Microsoft issued for its own launcher, not for third-party tools):"
-    say "      docker compose run --rm camera node scripts/camera-login.mjs --dir /auth --url"
-    say "      docker compose run --rm camera node scripts/camera-login.mjs --dir /auth --redeem 'THE ADDRESS'"
-    say "Then run ./setup.sh again: it starts the camera, runs the check and prints the URLs."
+    say "If Microsoft refused the device code ('first party application ... not permitted to consent'), use your own"
+    say "Azure app: put its client id into CAMERA_MSA_CLIENT_ID in .env (README, Troubleshooting), then run"
+    say "./setup.sh --camera-login. Then run ./setup.sh again: it starts the camera, runs the check and prints the URLs."
     die "the camera account is not signed in"
   fi
 }

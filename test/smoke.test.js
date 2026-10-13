@@ -116,7 +116,7 @@ test('config: the watch key, the camera service token, the host names, the local
   assert.equal(defaultGateway('/nonexistent'), null);
   // your own Azure app for the camera's sign-in
   assert.equal(loadConfig({ CAMERA_MSA_CLIENT_ID: '01234567-89ab-cdef-0123-456789abcdef' }).stream.camera.msaClientId, '01234567-89ab-cdef-0123-456789abcdef');
-  assert.throws(() => loadConfig({ CAMERA_MSA_CLIENT_ID: '00000000402b5328' }), /CAMERA_MSA_CLIENT_ID/);
+  assert.throws(() => loadConfig({ CAMERA_MSA_CLIENT_ID: 'not-a-client-id' }), /CAMERA_MSA_CLIENT_ID/);
 });
 
 test('contracts: 10 strict tools, every name is real in 1.21.4, validator', () => {

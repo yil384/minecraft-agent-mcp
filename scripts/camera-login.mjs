@@ -8,11 +8,8 @@
 //   node scripts/camera-login.mjs --dir /auth            # waits up to ~15 min for you, then stores the tokens
 //   node scripts/camera-login.mjs --dir /auth --check    # signed in? (refreshes if needed, never asks for a code)
 //   node scripts/camera-login.mjs --dir /auth --force    # sign in again even when the stored login still works
-// When Microsoft's device-code page refuses the flow ("first party application ... not permitted to consent"), the
-// better fix is your own Azure app (CAMERA_MSA_CLIENT_ID). Opt-in and at your own risk, the Minecraft launcher's
-// sign-in also works (it uses the official launcher's client id; see src/camera.js):
-//   node scripts/camera-login.mjs --dir /auth --url               # prints the sign-in address (also LOGIN_URL.txt)
-//   node scripts/camera-login.mjs --dir /auth --redeem 'ADDRESS'  # the blank page's whole address after signing in
+// When Microsoft's device-code page refuses the flow ("first party application ... not permitted to consent"), use
+// your own Azure app (CAMERA_MSA_CLIENT_ID; README, "Troubleshooting").
 //
 // Exit codes: 0 signed in, 1 failed or not signed in, 2 bad arguments.
 
@@ -21,16 +18,16 @@ import path from 'node:path';
 import { parseArgs } from 'node:util';
 import { pathToFileURL } from 'node:url';
 import { createRequire } from 'node:module';
-import { AUTH_CACHE_NAME, authOptions, cameraProfile, tightenAuthDir, launcherSignInUrl, redeemLauncherCode } from '../src/camera.js';
+import { AUTH_CACHE_NAME, authOptions, cameraProfile, tightenAuthDir } from '../src/camera.js';
 
 const require = createRequire(import.meta.url);
 
 export async function main(argv = process.argv.slice(2), { print = console.log, printErr = console.error, env = process.env } = {}) {
   let values;
   try {
-    ({ values } = parseArgs({ args: argv, strict: true, options: { dir: { type: 'string' }, check: { type: 'boolean' }, force: { type: 'boolean' }, url: { type: 'boolean' }, redeem: { type: 'string' }, help: { type: 'boolean', short: 'h' } } }));
+    ({ values } = parseArgs({ args: argv, strict: true, options: { dir: { type: 'string' }, check: { type: 'boolean' }, force: { type: 'boolean' }, help: { type: 'boolean', short: 'h' } } }));
   } catch (err) { printErr(err.message); return 2; }
-  if (values.help) { print('usage: node scripts/camera-login.mjs --dir AUTH_DIR [--check | --force | --url | --redeem ADDRESS]'); return 0; }
+  if (values.help) { print('usage: node scripts/camera-login.mjs --dir AUTH_DIR [--check | --force]'); return 0; }
   const dir = path.resolve(values.dir ?? env.CAMERA_AUTH_DIR ?? '');
   if (!values.dir && !env.CAMERA_AUTH_DIR) { printErr('--dir (or CAMERA_AUTH_DIR) is needed'); return 2; }
   process.umask(0o077);
@@ -39,39 +36,6 @@ export async function main(argv = process.argv.slice(2), { print = console.log, 
   const status = (text) => fs.writeFileSync(path.join(dir, 'LOGIN_STATUS.txt'), `${new Date().toISOString()} ${text}\n`, { mode: 0o600 });
 
   const clientId = String(env.CAMERA_MSA_CLIENT_ID ?? '').trim();
-  if (values.url) {
-    const text = [
-      'Sign the camera account in with the Minecraft launcher\'s sign-in.',
-      'Read this first: this way uses the official Minecraft Launcher\'s public client id, which Microsoft issued for its',
-      'own launcher, not for third-party tools. It is opt-in and at your own risk. The better fix is your own Azure app',
-      '(CAMERA_MSA_CLIENT_ID, README "Troubleshooting").',
-      '',
-      `  1. open (a private window is best): ${launcherSignInUrl()}`,
-      '  2. sign in with the account that owns Minecraft Java Edition and approve',
-      '  3. you land on a blank page: copy its whole address (it contains "code=M.") and redeem it within a few minutes:',
-      "     node scripts/camera-login.mjs --dir AUTH_DIR --redeem 'THE ADDRESS'",
-      '  4. then run ./setup.sh again: it starts the camera, runs the check and prints the URLs',
-      '',
-    ].join('\n');
-    fs.writeFileSync(path.join(dir, 'LOGIN_URL.txt'), text, { mode: 0o600 });
-    status('waiting for the launcher sign-in address to be redeemed (--redeem)');
-    print(text);
-    return 0;
-  }
-  if (values.redeem !== undefined) {
-    try {
-      const r = await redeemLauncherCode(dir, values.redeem);
-      status(`signed in: ${r.name} (${r.uuid})${r.ownsJava === null ? '' : `, owns Java Edition: ${r.ownsJava}`} (launcher sign-in)`);
-      print(`signed in as ${r.name}; tokens stored in ${dir}`);
-      return 0;
-    } catch (err) {
-      const msg = String(err?.message ?? err).replace(/[A-Za-z0-9_\-.!*$]{40,}/g, '***').slice(0, 300);
-      status(`failed: ${msg}`);
-      printErr(`login failed: ${msg}`);
-      return 1;
-    }
-  }
-
   if (values.check || !values.force) {
     try {
       const p = await cameraProfile({ auth: 'msa', authDir: dir, msaClientId: clientId });

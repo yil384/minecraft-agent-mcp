@@ -93,7 +93,8 @@ are enough for two bots). `live_view` says the live view is off.
 - Needs your own **Minecraft: Java Edition** account: the camera is a real Minecraft client. `setup.sh` signs it in
   with Microsoft's device code (open the link it prints, type the code, approve; never type your password anywhere but
   Microsoft's page). The tokens stay in `./data/camera-auth` on your machine. If Microsoft refuses the device code for
-  your account, the Minecraft launcher's own sign-in works instead (`setup.sh` prints how).
+  your account, sign in through an Azure app of your own instead (`CAMERA_MSA_CLIENT_ID`, see
+  [Troubleshooting](#troubleshooting)).
 - Needs an **x86-64** Linux machine (or Windows with WSL2): Mojang ships x86-64 Linux libraries for the 1.21.4 client.
   The camera draws on the CPU (about 4 cores and 1.5 GB while it films); with an NVIDIA GPU see
   [docs/CONFIG.md](docs/CONFIG.md#a-gpu-for-the-camera). Suggested: 8 cores, 12 GB of RAM.
@@ -262,7 +263,7 @@ Every limit is a setting in `.env`, with a default sized for one person on their
 | `port is already allocated` / `address already in use` | another program has 8787: `./setup.sh --port 18787` |
 | `setup: the server did not answer ... within 3 minutes` | `docker compose logs agent paper` (the last lines say why); then `./setup.sh` again |
 | The watch page or `live_view` says the camera account is not signed in | `./setup.sh --camera-login`, then `./setup.sh --status` |
-| Microsoft refuses the camera's device code ("first party application ... not permitted to consent") | Use your own Azure app: register one in the Microsoft Entra admin center (a public client, "Allow public client flows" on, personal Microsoft accounts), have it allowed for the Minecraft services API (Mojang reviews new apps), put its client id into `CAMERA_MSA_CLIENT_ID` in `.env`, then `./setup.sh --camera-login`. A second way, opt-in and at your own risk, is the Minecraft launcher's sign-in: `setup.sh` prints its two commands. It uses the official launcher's client id, which Microsoft issued for its own launcher, not for third-party tools |
+| Microsoft refuses the camera's device code ("first party application ... not permitted to consent") | Use your own Azure app: register one in the Microsoft Entra admin center (a public client, "Allow public client flows" on, personal Microsoft accounts), have it allowed for the Minecraft services API (Mojang reviews new apps), put its client id into `CAMERA_MSA_CLIENT_ID` in `.env`, then `./setup.sh --camera-login` |
 | `421` "does not answer to that host name" | you reached the server by a name it does not know: set `WEB_PUBLIC_URL` (a public URL) or add the name to `WEB_ALLOWED_HOSTS` |
 | The camera is up but nothing plays | `docker compose logs camera`; the first start downloads the client (a few minutes) |
 | Anything else | `docker compose logs --tail 100 agent paper camera`, and `./setup.sh --status` |
