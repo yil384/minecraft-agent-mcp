@@ -67,7 +67,7 @@ function fakeClock() {
 test('spread: the first scan of the new spot is read once it sees something; an empty one (chunks not there yet) is tried again, bounded', async () => {
   const c = fakeClock();
   assert.deepEqual(await settleAfterSpread(spreadBody({ emptyScans: 0 }), { x: 0, z: 0 }, c), { scans: 1, notable: 2 }, 'chunks there at once: one scan');
-  assert.deepEqual(c.waits.filter((ms) => ms === 500).length, 2, 'landed at the second look');
+  assert.equal(c.waits.filter((ms) => ms === 500).length, 2, 'landed at the second look');
 
   const c2 = fakeClock();
   assert.deepEqual(await settleAfterSpread(spreadBody({ emptyScans: 3 }), { x: 0, z: 0 }, c2), { scans: 4, notable: 2 }, 'three empty scans, then the chunks');

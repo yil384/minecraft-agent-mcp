@@ -25,6 +25,8 @@ import { TOOLS, TOOL_NAMES, SCHEMAS, validateArgs, coerceArgs } from './contract
 import { createLogger, scrub } from './log.js';
 import { createMcp } from './mcp.js';
 import { watchPage, WATCH_CSP, WATCH_SCRIPT, hlsScript } from './watch-page.js';
+import { moderator } from './moderation.js';
+import { endCardSvg, logoData } from './live-page.js';
 
 const HLS_NAME_RE = /^(live\.m3u8|seg-\d{1,12}\.ts)$/;
 
@@ -135,6 +137,7 @@ function html(strings, ...values) {
 const CSS = `:root{color-scheme:light dark;--bg:#f6f4ef;--card:#fffdf9;--fg:#1e1c19;--muted:#655f56;--line:#d8d1c4;--accent:#2d6a4f;--on-accent:#fff;--warn:#9c2f16;--warn-bg:#fbebe5}
 @media (prefers-color-scheme:dark){:root{--bg:#141311;--card:#1c1a17;--fg:#ece8e0;--muted:#a59f94;--line:#3a362f;--accent:#7cc49b;--on-accent:#0f1a14;--warn:#f29b7f;--warn-bg:#2c1a14}}
 *{box-sizing:border-box}
+.brand{display:block;max-width:100%;height:auto;margin:0 0 8px}
 body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.55 ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif}
 .wrap{max-width:54rem;margin:0 auto;padding:24px 16px 48px}
 h1{font-size:1.55rem;line-height:1.2;margin:0 0 .3rem}
@@ -168,7 +171,7 @@ ol.steps li{margin:.25rem 0}
 pre.oneline{font-size:15px;font-weight:600;border:2px solid var(--accent);padding:14px;margin:.5rem 0}`;
 
 const STYLE_SRC = `'sha256-${crypto.createHash('sha256').update(CSS).digest('base64')}'`;
-const HTML_CSP = `default-src 'none'; style-src ${STYLE_SRC}; img-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'`;
+const HTML_CSP = `default-src 'none'; style-src ${STYLE_SRC}; img-src 'self' data:; form-action 'self'; base-uri 'none'; frame-ancestors 'none'`;
 const BASE_HEADERS = Object.freeze({
   'x-content-type-options': 'nosniff',
   'referrer-policy': 'no-referrer', // the token is in the URL: never leak it in a Referer
@@ -500,6 +503,31 @@ export function createWeb(opts = {}) {
   const sessionsPerAddress = opts.sessionsPerAddress ?? 1;
   const sessionCooldownMs = opts.sessionCooldownMs ?? 60_000;
   const mcpGamesPerAddress = opts.mcpGamesPerAddress ?? web.mcpGamesPerAddress ?? Math.max(2, Math.floor(web.maxSessions / 2));
+  // a server you share (README, "Hosting a public server"): new games on or off at once (PUBLIC_PLAY, /admin/public),
+  // the owner's key, address hashes (never an address in a log or on a page) and the bans
+  let publicPlay = web.publicPlay !== false;
+  const ownerKey = web.ownerKey ?? '';
+  const ipSalt = web.ipSalt || (web.adminToken ? crypto.createHash('sha256').update(`ip-salt|${web.adminToken}`).digest('hex') : crypto.randomBytes(16).toString('hex'));
+  /** The hash an address shows as: 12 hex characters, the same for one address while the salt stays. */
+  const ipHash = (address) => crypto.createHash('sha256').update(`${ipSalt}|${address}`).digest('hex').slice(0, 12);
+  const bansFile = opts.bansFile !== undefined ? opts.bansFile : (cfg.mineai?.dataDir ? path.join(cfg.mineai.dataDir, 'bans.json') : null);
+  const bans = new Map((web.bannedIps ?? []).map((h) => [h, { until: null, via: 'env' }])); // hash -> {until (ms or null), via}
+  if (bansFile) {
+    try { for (const [h, b] of Object.entries(JSON.parse(fs.readFileSync(bansFile, 'utf8')))) if (!bans.has(h)) bans.set(h, b); } catch { /* none yet */ }
+  }
+  const saveBans = () => {
+    if (!bansFile) return;
+    try {
+      const own = Object.fromEntries([...bans].filter(([, b]) => b.via !== 'env'));
+      fs.writeFileSync(bansFile, JSON.stringify(own, null, 1), { mode: 0o600 });
+    } catch (err) { log.event('admin_error', { message: `bans not saved: ${String(err?.message ?? err).slice(0, 120)}` }); }
+  };
+  const banned = (address) => {
+    const b = bans.get(ipHash(address));
+    if (!b) return false;
+    if (b.until && b.until <= now()) { bans.delete(ipHash(address)); saveBans(); return false; }
+    return true;
+  };
   const adminToken = web.adminToken ?? '';
   // the MCP endpoint's key (MCP_ACCESS_KEY): /mcp/<key>, or /mcp with "Authorization: Bearer <key>"
   const accessKey = String(opts.accessKey ?? web.accessKey ?? '');
@@ -510,10 +538,33 @@ export function createWeb(opts = {}) {
 
   const sessions = new Map(); // token -> session
   const ended = new Map(); // token -> {reason, at}, so an old link explains itself
+  // view id -> its game's end ({game, at, reason, caller, report, attribution}): the live page asks after its game by
+  // the game's secret view id (src/live-page.js), never by the game id the stream shows
+  const endedGames = new Map();
+  // the owner's key (MCP_OWNER_KEY): compared in constant time, never logged
+  const ownerDigest = web.ownerKey ? crypto.createHash('sha256').update(web.ownerKey).digest() : null;
+  // ?owner=<key> on the MCP URL, or the header X-Owner-Key (the access key stays in the path or Authorization: Bearer)
+  const isOwner = (req) => {
+    if (!ownerDigest) return false;
+    let k = String(req.headers['x-owner-key'] ?? '');
+    if (!k) { try { k = new URL(req.url, 'http://local').searchParams.get('owner') ?? ''; } catch { k = ''; } }
+    if (!k) return false;
+    return crypto.timingSafeEqual(crypto.createHash('sha256').update(k).digest(), ownerDigest);
+  };
+  // the camera's state per game for the live page (2 s cache: every page asks every 15 s)
+  const camCache = new Map();
+  const camState = async (id) => {
+    const c = camCache.get(id);
+    if (c && now() - c.at < 2_000) return c.st;
+    const st = opts.liveState ? await opts.liveState(id) : null;
+    camCache.set(id, { at: now(), st });
+    if (camCache.size > 500) camCache.delete(camCache.keys().next().value);
+    return st;
+  };
   const sessionLimiter = createLimiter(opts.sessionsPerHour ?? 30, now);
   const adminFails = createLimiter(5, now);
   const keyFails = createLimiter(30, now); // wrong MCP access keys per address and hour
-  const mcpStartLimiter = createLimiter(opts.mcpStartsPerHour ?? 60, now);
+  const mcpStartLimiter = createLimiter(opts.mcpStartsPerHour ?? web.mcpStartsPerHour ?? 10, now);
   const mcpInitLimiter = createLimiter(opts.mcpInitsPerHour ?? 1_200, now);
   const viewLimiter = createLimiter(opts.viewsPerHour ?? 120, now);
   const viewMisses = createLimiter(opts.viewMissesPerHour ?? VIEW_MISSES_PER_HOUR, now);
@@ -570,9 +621,8 @@ export function createWeb(opts = {}) {
   const isLoopbackPeer = (ip) => ip === '::1' || /^127\./.test(ip)
     || (localCount > 0 && net.isIP(ip) > 0 && localList.check(ip, net.isIPv4(ip) ? 'ipv4' : 'ipv6'));
   // a peer in the log: never its address (the pages promise that), only a short hash of it and its kind
-  const logSalt = crypto.randomBytes(16);
   const peerTag = (ip) => ({
-    peer: crypto.createHmac('sha256', logSalt).update(String(ip)).digest('hex').slice(0, 12),
+    peer: ipHash(ip), // the hash GET /admin/games shows and WEB_BANNED_IPS takes
     peerKind: isLoopbackPeer(ip) ? 'local' : isLanHost(ip) ? 'private' : 'public',
   });
   /** May this request's forwarded headers be believed? Only with WEB_TRUST_PROXY on, and only from the proxy. */
@@ -735,7 +785,7 @@ export function createWeb(opts = {}) {
       offs: [],
     };
     sessions.set(s.token, s);
-    log.event('session_start', { session: s.id, leaseMs: web.leaseMs });
+    log.event('session_start', { session: s.id, leaseMs: web.leaseMs, ip: ipHash(address) });
     addLine(s, 'session started; the bot is joining the world');
     s.ready = (async () => {
       const body = await makeBody(s.id, { viewId: s.viewId });
@@ -779,7 +829,15 @@ export function createWeb(opts = {}) {
     while (endedViews.size > ENDED_KEPT) endedViews.delete(endedViews.keys().next().value);
     for (const off of s.offs) { try { off?.(); } catch { /* ignore */ } }
     const attribution = typeof s.body?.attribution === 'function' ? (() => { try { return s.body.attribution(); } catch { return null; } })() : null;
-    log.event('session_end', { session: s.id, reason, ...(attribution ? { attribution: { agent: attribution.agent, reflex: attribution.reflex, care: attribution.care, agentPct: attribution.agentPct } } : {}) });
+    // who acted, as get_state says it: the agent directly, by its rules (which, with when each was set), the body on its own
+    const rulesNow = typeof s.body?.rules === 'function' ? (() => { try { return s.body.rules(); } catch { return null; } })() : null;
+    if (/^g[0-9a-f]{6,16}$/.test(String(s.id))) {
+      let report = null;
+      try { report = s.tracker?.report?.({ gameId: s.id, attribution })?.data ?? null; } catch { report = null; }
+      endedGames.set(s.viewId, { game: s.id, at: now(), reason, caller: s.caller ?? null, report, attribution: attribution ? { agent: attribution.agent, reflex: attribution.reflex, agentPct: attribution.agentPct, ...(attribution.rule != null ? { rule: attribution.rule, body: attribution.body, decidedPct: attribution.decidedPct } : {}) } : null });
+      while (endedGames.size > 200) endedGames.delete(endedGames.keys().next().value);
+    }
+    log.event('session_end', { session: s.id, reason, ...(attribution ? { attribution: { agent: attribution.agent, reflex: attribution.reflex, care: attribution.care, agentPct: attribution.agentPct, ...(attribution.rule != null ? { rule: attribution.rule, body: attribution.body, decidedPct: attribution.decidedPct, byRule: attribution.byRule, ...(rulesNow ? { rules: rulesNow.rules, set: rulesNow.set } : {}) } : {}) } } : {}) });
     const body = s.body;
     s.closed = !body ? Promise.resolve() : Promise.resolve()
       .then(() => body.close?.())
@@ -822,14 +880,14 @@ export function createWeb(opts = {}) {
   const snapshot = (s) => (s.status === 'ready' && s.body ? safe(() => s.body.snapshot(), null) : null);
 
   /** Start one action; resolves {ok, promise} or {ok:false, status, error}. */
-  function startAction(s, tool, args) {
+  function startAction(s, tool, args, meta = null) {
     if (s.ended) return { ok: false, status: 410, error: `the session has ended: ${s.ended}` };
     if (s.status !== 'ready' || !s.body) return { ok: false, status: 503, error: 'the bot is still joining the world; try again in a few seconds' };
     if (s.running || s.body.busy) return { ok: false, status: 409, error: `busy: ${s.running?.tool ?? 'an action'} is still running (stop it or wait)` };
     s.running = { tool, args, started: now() };
     s.notice = null;
     const promise = Promise.resolve()
-      .then(() => s.body.run(tool, args))
+      .then(() => s.body.run(tool, args, meta))
       .then((r) => ({
         ok: Boolean(r?.ok), result: String(r?.result ?? ''), delta: isPlainObject(r?.delta) ? r.delta : {}, ms: r?.ms,
         ...(isPlainObject(r?.phases) ? { phases: r.phases } : {}), ...(typeof r?.code === 'string' ? { code: r.code } : {}),
@@ -888,6 +946,39 @@ export function createWeb(opts = {}) {
 
   // ----- pages
 
+  /**
+   * The page a browser gets at the MCP URL: this is an agent's address (MCP, streamable HTTP), the one sentence to send
+   * it, how to add it to an MCP client, the source, the not-affiliated line, and the logo when STREAM_LOGO is on. It is
+   * shown only to a request that has the access key (the path holds it), so the URL it shows is the one opened.
+   */
+  function mcpPage(req, keyInPath) {
+    const mcpUrl = `${web.publicUrl || base(req)}/mcp${keyInPath ? `/${keyInPath}` : ''}`;
+    const oneLine = `Play Minecraft on ${mcpUrl} and get to the Nether and back.`;
+    const source = web.openSourceUrl;
+    const logo = (cfg.stream?.logo ?? 'off') !== 'off' ? logoData(cfg.stream?.logoFile || '') : null;
+    return page({
+      title: `${web.name}: the address for your AI agent`,
+      index: false,
+      main: html`<header>${logo ? html`<img class="brand" src="${logo}" alt="" width="280">` : ''}
+<h1>This is the address for your AI agent</h1>
+<p><code>${mcpUrl}</code> is an MCP server (streamable HTTP), not a web page. Give it to an AI agent and the agent
+plays its own Minecraft bot in this server's world.${keyInPath ? ' The address holds this server\'s access key: share it only with people who may play.' : ''}</p></header>
+<main>
+<section aria-labelledby="h-line"><h2 id="h-line">Send your agent one sentence</h2>
+<pre class="oneline">${oneLine}</pre>
+<p class="muted">Other goals: end it with "get an iron pickaxe", "get diamonds" or "just play".</p></section>
+<section aria-labelledby="h-add"><h2 id="h-add">Add it to your agent</h2>
+<ul class="steps">
+<li><strong>A client with remote MCP servers:</strong> add a remote MCP server (a connector or custom integration) of type streamable HTTP with this URL. The server's tools and its ready prompts (play_to_the_nether, free_play) explain the rest to the agent.</li>
+<li><strong>Claude Code:</strong> <code>claude mcp add --transport http minecraft ${mcpUrl}</code></li>
+<li><strong>A client with local (stdio) servers only:</strong> <code>node scripts/stdio-bridge.mjs ${mcpUrl}</code> from the project's folder.</li>
+</ul></section>
+<section aria-labelledby="h-more"><h2 id="h-more">More</h2>
+<p>${source ? html`The server is open source: <a href="${source}">${source.replace(/^https:\/\//, '')}</a>. ` : ''}How it works: <a href="/">the start page</a>.</p></section>
+</main>`,
+    });
+  }
+
   function landingPage(req) {
     const lease = leaseWords(web.leaseMs);
     // the MCP URL: with a key, the operator has it (setup.sh printed it); it is never shown here
@@ -898,9 +989,9 @@ export function createWeb(opts = {}) {
       + 'After each action, press "Check again" until Status says "Ready for the next action", then read "Last result" before you choose the next one. '
       + 'Stop when the hut is built.';
     const liveWords = cfg.stream?.liveView === 'local'
-      ? 'Live view: the camera films the game whose live_view call came last; live_view gives a link to its watch page (the game and the HUD, a few seconds behind).'
+      ? 'Live view: one camera, first come, first served (a game that asks while another has it waits in line); live_view gives a link to its watch page (the game and the HUD, a few seconds behind).'
       : cfg.stream?.liveView === 'facebook'
-        ? 'Live view: the camera films the game whose live_view call came last, as a live video on the operator\'s Facebook profile or Page; live_view gives the player.'
+        ? 'Live view: one camera, first come, first served (a game that asks while another has it waits in line), each game a live video of its own on the operator\'s Facebook profile or Page; live_view gives the player.'
         : 'Live view: off on this server.';
     return page({
       title: web.name,
@@ -1053,10 +1144,10 @@ ${lines.length ? html`<ol class="log">${lines.map((l) => html`<li>${clock(l.at).
    * give it a place and refuse with the place and an estimate. The estimate is when enough leases end; games often end
    * sooner (end_game, 5 idle minutes).
    */
-  function queued(key, mcp, free) {
+  function queued(key, mcp, free, first = false) {
     const t = now();
     let at = waiting.findIndex((w) => w.key === key);
-    if (at < 0) { waiting.push({ key, since: t, seen: t }); at = waiting.length - 1; } else waiting[at].seen = t;
+    if (at < 0 && first) { waiting.unshift({ key, since: t, seen: t }); at = 0; } else if (at < 0) { waiting.push({ key, since: t, seen: t }); at = waiting.length - 1; } else waiting[at].seen = t;
     const place = at + 1;
     const ends = [...sessions.values()].map((x) => x.expiresAt).sort((a, b) => a - b);
     const k = Math.max(1, place - free); // the leases that must end before this caller's turn
@@ -1083,14 +1174,18 @@ ${lines.length ? html`<ol class="log">${lines.map((l) => html`<li>${clock(l.at).
     sweep();
     const address = mcp ? mcp.address : clientKey(req);
     const key = mcp ? mcp.key : address;
+    const owner = Boolean(mcp?.owner);
+    if (!publicPlay && !owner) throw new HttpError(503, 'this server is closed for new games right now; try again later', { 'retry-after': '600' }, { closed: true });
+    if (!owner && banned(address)) throw new HttpError(403, 'this address may not play on this server');
     const retry = (ms) => ({ 'retry-after': String(Math.max(1, Math.ceil(ms / 1000))) });
     const soonestOf = (list) => Math.min(...list.map((x) => x.expiresAt)) - now();
     const mine = [...sessions.values()].filter((x) => x.client === key);
     if (mine.length >= sessionsPerAddress) {
       throw new HttpError(429, `${mcp ? 'this connection' : 'your address'} already has a bot (one at a time); end that session or wait about ${duration(soonestOf(mine))}`, retry(soonestOf(mine)));
     }
-    if (mcp) {
-      const fromAddress = [...sessions.values()].filter((x) => x.address === address && x.client.startsWith('mcp:'));
+    if (mcp && !owner) {
+      // the owner's games do not count (the owner's agent may share its cloud's address with other players)
+      const fromAddress = [...sessions.values()].filter((x) => x.address === address && x.client.startsWith('mcp:') && !x.owner);
       if (fromAddress.length >= mcpGamesPerAddress) {
         throw new HttpError(429, `your connector's address already plays ${mcpGamesPerAddress} game${mcpGamesPerAddress === 1 ? '' : 's'}, the most one address may hold; the next one frees up in about ${duration(soonestOf(fromAddress))}`, retry(soonestOf(fromAddress)));
       }
@@ -1099,11 +1194,14 @@ ${lines.length ? html`<ol class="log">${lines.map((l) => html`<li>${clock(l.at).
     if (cool > 0) throw new HttpError(429, `your last session just ended; the next guest goes first, try again in about ${duration(cool)}`, retry(cool));
     const free = Math.max(0, web.maxSessions - sessions.size);
     const at = waiting.findIndex((w) => w.key === key);
-    if ((at < 0 ? waiting.length : at) >= free) queued(key, mcp, free);
-    const limit = mcp ? mcpStartLimiter.take(address) : sessionLimiter.take(key);
+    // the owner goes first: ahead of the queue, never behind it
+    if (owner ? free < 1 : (at < 0 ? waiting.length : at) >= free) queued(key, mcp, free, owner);
+    const limit = owner ? { ok: true } : mcp ? mcpStartLimiter.take(address) : sessionLimiter.take(key);
     if (!limit.ok) throw new HttpError(429, `too many sessions from your ${mcp ? "connector's " : ''}address; try again in ${duration(limit.retryMs)}`, retry(limit.retryMs));
     if (at >= 0) waiting.splice(at, 1);
-    return startSession(key, address);
+    const started = startSession(key, address);
+    if (owner) started.owner = true;
+    return started;
   }
 
   function isAdmin(req, fields) {
@@ -1144,6 +1242,70 @@ ${lines.length ? html`<ol class="log">${lines.map((l) => html`<li>${clock(l.at).
     if (end) for (const s of live) endSession(s, 'ended by the operator');
     log.event('admin_stop', { stopped, cleared: cleared.length, ended: end ? live.length : 0 });
     return sendJson(res, 200, { stopped, cleared: cleared.length, ended: end ? live.length : 0 });
+  }
+
+  /** Who plays now (the operator's view): each game with its address hash, caller, goal, times; the queue; the bans. */
+  function adminGames() {
+    const t = now();
+    return {
+      publicPlay,
+      maxSessions: web.maxSessions,
+      games: [...sessions.values()].map((x) => ({
+        game: x.id,
+        ip: ipHash(x.address),
+        mcp: String(x.client ?? '').startsWith('mcp:'),
+        caller: x.caller ?? null,
+        goal: (() => { try { const g = x.tracker?.goal; return g ? (g.title ?? g.key) : null; } catch { return null; } })(),
+        status: x.status,
+        startedS: Math.round((t - x.created) / 1000),
+        leftS: Math.max(0, Math.round((x.expiresAt - t) / 1000)),
+      })),
+      queue: waiting.length,
+      bans: [...bans].map(([ip, b]) => ({ ip, until: b.until ? new Date(b.until).toISOString() : null, via: b.via ?? 'admin' })),
+    };
+  }
+
+  /**
+   * The operator's actions (Bearer WEB_ADMIN_TOKEN): end {game} ends one game; ban {ip, hours?} bans an address hash
+   * (and ends its games); unban {ip}; public {on} opens or closes the server to new games at once.
+   */
+  async function adminAct(what, req, res) {
+    adminGate(req);
+    const { fields } = await readFields(req, web.maxBodyBytes);
+    requireAdmin(req, fields);
+    const yes = (v) => v === true || v === 1 || /^(1|true|yes|on)$/i.test(String(v ?? ''));
+    if (what === 'end') {
+      const s = [...sessions.values()].find((x) => x.id === String(fields.game ?? ''));
+      if (!s) throw new HttpError(404, 'no running game with that id');
+      endSession(s, 'ended by the operator');
+      log.event('admin_end', { game: s.id });
+      return sendJson(res, 200, { ended: s.id });
+    }
+    if (what === 'ban' || what === 'unban') {
+      const ip = String(fields.ip ?? '').toLowerCase();
+      if (!/^[0-9a-f]{12}$/.test(ip)) throw new HttpError(400, 'ip must be a 12-character address hash (GET /admin/games shows them)');
+      if (what === 'unban') {
+        const had = bans.delete(ip);
+        saveBans();
+        log.event('admin_unban', { ip });
+        return sendJson(res, 200, { unbanned: had ? ip : null });
+      }
+      const hours = Number(fields.hours);
+      const until = Number.isFinite(hours) && hours > 0 ? now() + hours * 3_600_000 : null;
+      bans.set(ip, { until, via: 'admin' });
+      saveBans();
+      let endedN = 0;
+      // the owner's games stay (its agent may share a cloud's address with the banned one)
+      for (const s of [...sessions.values()]) if (ipHash(s.address) === ip && !s.owner) { endSession(s, 'ended by the operator'); endedN += 1; }
+      log.event('admin_ban', { ip, hours: until ? hours : null, ended: endedN });
+      return sendJson(res, 200, { banned: ip, until: until ? new Date(until).toISOString() : null, ended: endedN });
+    }
+    if (what === 'public') {
+      publicPlay = yes(fields.on);
+      log.event('admin_public', { on: publicPlay });
+      return sendJson(res, 200, { publicPlay });
+    }
+    throw new HttpError(404, 'not found');
   }
 
   /** The live session whose 3D views listen under this view id (128 random bits; not the game id, not the token). */
@@ -1333,13 +1495,16 @@ ${lines.length ? html`<ol class="log">${lines.map((l) => html`<li>${clock(l.at).
   // ----- the local watch page (LIVE_VIEW=local)
 
   const watch = opts.watch ?? null;
-  let liveCache = { at: 0, value: null, pending: null };
-  /** The camera channel's state, asked at most once a second (every watcher polls it). */
-  async function channelState() {
+  // the channel's state, and per game (its place in line), cached for a second: every watch page asks every few seconds
+  const liveCache = new Map(); // '' or a game id -> {at, value, pending}
+  async function channelState(id = null) {
     if (!watch) return null;
-    if (now() - liveCache.at < 1_000) return liveCache.value;
-    liveCache.pending ??= Promise.resolve(watch.live()).catch(() => null).then((v) => { liveCache = { at: now(), value: v, pending: null }; return v; });
-    return liveCache.pending;
+    const k = id ?? '';
+    const c = liveCache.get(k) ?? { at: 0, value: null, pending: null };
+    if (now() - c.at < 1_000) return c.value;
+    if (!liveCache.has(k)) { liveCache.set(k, c); while (liveCache.size > 200) liveCache.delete(liveCache.keys().next().value); }
+    c.pending ??= Promise.resolve(watch.live(id)).catch(() => null).then((v) => { Object.assign(c, { at: now(), value: v, pending: null }); return v; });
+    return c.pending;
   }
   const isWatchKey = (given) => Boolean(watchKey) && typeof given === 'string' && given !== accessKey
     && crypto.timingSafeEqual(digest(given), digest(watchKey));
@@ -1374,13 +1539,16 @@ ${lines.length ? html`<ol class="log">${lines.map((l) => html`<li>${clock(l.at).
     // a game's page waits for the first segment of its own picture after the camera came to it
     const moving = Boolean(s) && here && st.state === 'live' && Number.isFinite(st.lastSeg) && Number(st.lastSeg) < (Number(st.fromSeg) || 0);
     const out = { state: moving ? 'starting' : st.state, live: st.state === 'live' && !moving, here, since: st.liveSince ?? null, aspect: st.aspect ?? null };
-    if (moving) {
+    if (st.state === 'queued') {
+      out.text = `In line for the camera: number ${st.queue?.position ?? '?'} (about ${st.queue?.waitMin ?? '?'} min). Game ${s?.id ?? ''} runs normally; this page shows it when the camera reaches it.`;
+      out.queue = st.queue ?? null;
+    } else if (moving) {
       out.text = 'The camera is moving to this game: its picture comes in a few seconds.';
     } else if (st.state === 'live') {
       out.text = here ? `Live${s ? ` on game ${s.id}` : st.game ? ` on game ${st.game}` : ''}${st.liveSince ? `, since ${at(st.liveSince)} UTC` : ''}.`
-        : `The camera is on another game now. A live_view call in game ${s?.id ?? ''} brings it back here.`;
+        : `The camera is on another game now. Game ${s?.id ?? ''} gets it when its turn comes (a live_view call puts it in line).`;
     } else if (st.state === 'starting' || st.state === 'connecting') {
-      out.text = here || !s ? 'The camera is starting: the first picture takes 10 to 40 seconds.' : `The camera is starting for another game. A live_view call in game ${s.id} brings it here.`;
+      out.text = here || !s ? 'The camera is starting: the first picture takes 10 to 40 seconds.' : `The camera is starting for another game. Game ${s.id} gets it when its turn comes (a live_view call puts it in line).`;
     } else if (st.state === 'retrying') {
       out.text = `The camera could not start${st.error ? ` (${scrub(String(st.error), [accessKey]).slice(0, 160)})` : ''}; it tries again by itself${st.retryInS ? ` in ${st.retryInS} s` : ''}.`;
     } else if (st.state === 'ending') {
@@ -1453,6 +1621,28 @@ ${lines.length ? html`<ol class="log">${lines.map((l) => html`<li>${clock(l.at).
       if (!js) throw new HttpError(404, 'hls.js is not installed');
       return send(res, 200, js, { 'content-type': 'text/javascript; charset=utf-8', 'cache-control': 'public, max-age=86400' });
     }
+    // the live page's question (an image: a client's preview panel allows no fetch), by the game's secret view id: has
+    // this game ended? 1 px wide no, 2 px yes, 3 px on camera and live (a page in line swaps in the player); its live
+    // video's id in v0..v2.svg (4 digits in each side, +1; the id padded to 24 digits); and the ended game's card
+    const lv = /^\/live\/([A-Za-z0-9_-]{8,128})\/(state|end|v[0-2])\.svg$/.exec(p);
+    if (lv) {
+      req.resume();
+      const img = { 'content-type': 'image/svg+xml', 'cache-control': 'no-store', 'content-security-policy': "default-src 'none'", 'cross-origin-resource-policy': 'cross-origin' };
+      const none = '<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1"/>';
+      const e = endedGames.get(lv[1]);
+      const s = e ? null : sessionByView(lv[1]);
+      if (!e && !s) return send(res, 404, none, img);
+      const st = s ? await camState(s.id) : null;
+      const vid = st && st.state === 'live' && st.game === s.id && /^\d{1,24}$/.test(String(st.videoId ?? '')) ? String(st.videoId).padStart(24, '0') : null;
+      if (lv[2] === 'state') return send(res, 200, `<svg xmlns="http://www.w3.org/2000/svg" width="${e ? 2 : vid ? 3 : 1}" height="1"/>`, img);
+      if (lv[2][0] === 'v') {
+        if (!vid) return send(res, 404, none, img);
+        const k = Number(lv[2][1]);
+        return send(res, 200, `<svg xmlns="http://www.w3.org/2000/svg" width="${1 + Number(vid.slice(k * 8, k * 8 + 4))}" height="${1 + Number(vid.slice(k * 8 + 4, k * 8 + 8))}"/>`, img);
+      }
+      if (!e) return send(res, 404, none, img);
+      return send(res, 200, endCardSvg({ game: e.game, caller: e.caller, reason: e.reason, report: e.report, attribution: e.attribution, name: web.name }), img);
+    }
     if (!watch) { req.resume(); throw new HttpError(404, 'the watch page is off on this server (LIVE_VIEW is not local)'); }
     const m = p.match(/^\/live\/([A-Za-z0-9_-]{1,128})(\/(?:status|hls\/[^/]+)?)?$/);
     if (!m) throw new HttpError(404, 'not found');
@@ -1461,13 +1651,13 @@ ${lines.length ? html`<ol class="log">${lines.map((l) => html`<li>${clock(l.at).
     if (!m[2]) return redirect(res, `/live/${m[1]}/`);
     if (m[2] === '/') {
       const st = await channelState();
-      const what = found.camera ? 'This page shows whichever game the camera films (the one whose live_view call came last).'
+      const what = found.camera ? 'This page shows whichever game the camera films (one camera, first come, first served).'
         : `This page follows game ${found.s.id} while the camera films it.`;
       return send(res, 200, watchPage({ base: `/live/${m[1]}/`, aspect: String(st?.aspect ?? '1/1'), title: web.name, notice: `${web.operator ? `Run by ${web.operator}. ` : ''}${NOT_OFFICIAL} ${NOT_AFFILIATED}`, what }), {
         'content-type': 'text/html; charset=utf-8', 'content-security-policy': WATCH_CSP, 'cache-control': 'no-store', 'x-robots-tag': 'noindex, nofollow',
       });
     }
-    if (m[2] === '/status') return sendJson(res, 200, watchStatus(await channelState(), found.s ?? null));
+    if (m[2] === '/status') return sendJson(res, 200, watchStatus(await channelState(found.s?.id ?? null), found.s ?? null));
     const name = m[2].slice('/hls/'.length);
     if (!HLS_NAME_RE.test(name)) throw new HttpError(404, 'not found');
     // a game's page plays the picture (the playlist and every segment) only while the camera films that game, and only
@@ -1494,13 +1684,23 @@ ${lines.length ? html`<ol class="log">${lines.map((l) => html`<li>${clock(l.at).
     const mk = p.match(/^\/mcp(?:\/([^/]{1,200}))?\/?$/);
     if (mk) {
       mcpAccess(req, mk[1]);
+      // a person who opens the MCP address in a browser: a page that says what it is and how to give it to an agent;
+      // MCP clients (no text/html, or a session, or an event stream) never get it
+      if (req.method === 'GET' && !req.headers['mcp-session-id'] && /text\/html/i.test(String(req.headers.accept ?? '')) && !/text\/event-stream/i.test(String(req.headers.accept ?? ''))) {
+        req.resume();
+        return sendHtml(res, 200, mcpPage(req, mk[1]));
+      }
       mcp ??= createMcp({
         newSession, lookup, startAction, stateText, stopSession, endSession, within, TIMEOUT, log, now, clientKey, base,
-        leaseMs: web.leaseMs, idleMs: web.idleMs, testLives: Boolean(web.testLives), initLimiter: mcpInitLimiter, callMs: opts.mcpCallMs, skills: opts.skills, careMode: opts.careMode,
-        limits: opts.mcpLimits ?? { sessions: web.mcpSessions ?? 200, perAddress: web.mcpSessionsPerAddress ?? 20 },
+        leaseMs: web.leaseMs, idleMs: opts.idleMs ?? web.idleMs, testLives: Boolean(web.testLives), testRecord: Boolean(web.testRecord), initLimiter: mcpInitLimiter, callMs: opts.mcpCallMs, skills: opts.skills, careMode: opts.careMode,
+        limits: { sessions: web.mcpSessions ?? 200, perAddress: web.mcpSessionsPerAddress ?? 20, perMinute: web.mcpRequestsPerMinute ?? 120, ...(opts.mcpLimits ?? {}) },
+        posterLogo: (cfg.stream?.logo ?? 'off') !== 'off' ? (cfg.stream?.logoFile || true) : false,
+        banned, publicChat: web.publicChat !== false, moderate: opts.moderate,
         liveMode: opts.liveMode ?? (cfg.stream?.liveView && cfg.stream.liveView !== 'off' ? cfg.stream.liveView : opts.liveView ? 'facebook' : 'off'), serverName: web.name,
         links: (s, b) => ({ eyes: `${b}/eyes/${s.viewId}/`, watch: `${b}/watch/${s.viewId}/`, live: `${b}/live/${s.viewId}/`, views3d: Boolean(s.body?.eyesPort) }),
         liveView: opts.liveView ? (s, o) => Promise.resolve(opts.liveView(s.id, o)).catch(() => null) : null,
+        isOwner: (req) => isOwner(req),
+        liveEnabled: opts.liveEnabled === true,
         term: typeof opts.term === 'function' ? (id, u) => { try { opts.term(id, u); } catch { /* the video goes on without it */ } } : null,
         leaveQueue: (key) => { const i = waiting.findIndex((w) => w.key === key); if (i >= 0) waiting.splice(i, 1); },
         watching: (id) => { let n = 0; for (const k of viewSockets) if (k.gameId === id && !k.destroyed) n += 1; return n; },
@@ -1525,7 +1725,7 @@ ${lines.length ? html`<ol class="log">${lines.map((l) => html`<li>${clock(l.at).
       only('GET');
       requireAdmin(req);
       const n = Math.min(200, Math.max(1, Number.parseInt(u.searchParams.get('n') ?? '50', 10) || 50));
-      const secrets = [adminToken, ...sessions.keys()];
+      const secrets = [adminToken, ...(ownerKey ? [ownerKey] : []), ...sessions.keys()];
       const body = log.tail(n).map((row) => scrub(jsonText(row), secrets)).join('\n');
       return send(res, 200, body ? `${body}\n` : '', { 'content-type': 'application/x-ndjson; charset=utf-8', 'cache-control': 'no-store', ...PRIVATE });
     }
@@ -1536,6 +1736,8 @@ ${lines.length ? html`<ol class="log">${lines.map((l) => html`<li>${clock(l.at).
       return redirect(res, playPath(s));
     }
     if (p === '/admin/stop') { only('POST'); return adminStop(req, res); }
+    if (p === '/admin/games') { only('GET'); requireAdmin(req); req.resume(); return sendJson(res, 200, adminGames()); }
+    if (['/admin/end', '/admin/ban', '/admin/unban', '/admin/public'].includes(p)) { only('POST'); return adminAct(p.slice(7), req, res); }
 
     const w = p.match(/^\/(watch|eyes)\/([A-Za-z0-9_-]+)(\/.*)?$/);
     if (w) {
@@ -1580,6 +1782,7 @@ ${lines.length ? html`<ol class="log">${lines.map((l) => html`<li>${clock(l.at).
       const check = coerceArgs(action, fields);
       if (!check.ok) { s.notice = `Not run: ${check.error}`; return redirect(res, playPath(s)); }
       if (action === 'get_state') { s.notice = 'State read.'; return redirect(res, playPath(s)); }
+      if (action === 'say' && !web.publicChat && !s.owner) { s.notice = 'Not run: say (in-game chat) is off on this server (PUBLIC_CHAT=off).'; return redirect(res, playPath(s)); }
       const started = startAction(s, action, check.args);
       if (!started.ok) { s.notice = `Not run: ${started.error}`; return redirect(res, playPath(s)); }
       await within(started.promise, formWaitMs);
@@ -1616,6 +1819,8 @@ ${lines.length ? html`<ol class="log">${lines.map((l) => html`<li>${clock(l.at).
         const text = stateText(s);
         return sendJson(res, 200, { ok: s.status === 'ready', result: text, tool: action, args: {}, delta: {}, ms: 0, state: text }, PRIVATE);
       }
+      // in-game chat is the owner's when PUBLIC_CHAT is off (the web page's guests are outside players too)
+      if (action === 'say' && !web.publicChat && !s.owner) return sendJson(res, 403, { error: 'say (in-game chat) is off on this server (PUBLIC_CHAT=off)', code: 'NOT_ALLOWED' });
       const started = startAction(s, action, check.args);
       if (!started.ok) return sendJson(res, started.status, { error: started.error });
       const r = await within(started.promise, apiWaitMs);

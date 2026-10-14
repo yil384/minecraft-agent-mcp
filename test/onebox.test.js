@@ -23,7 +23,7 @@ import { promptText } from '../src/mcp.js';
 import { fakeHosts } from './fake-mineai.js';
 
 // the reply as these tests read it: without the nudges at the top (test/liveview.test.js checks them)
-const text = (r) => r.content.map((x) => x.text).join('\n').replace(/^(?:(?:Your user cannot see the game yet|Viewers see your why and plan under the video): [^\n]*\n\n)+/, '');
+const text = (r) => r.content.map((x) => x.text).join('\n').replace(/^(?:(?:Your user cannot see the game yet: |Viewers see your why and plan under the video: |Next: call live_view now)[^\n]*\n\n)+/, '');
 
 async function connect(url) {
   const c = new Client({ name: 'test', version: '1' });
@@ -92,6 +92,8 @@ test('one line is enough: the instructions carry every standing rule; tools, goa
       /next to a still lava pool/, /collect gravel \(it drops flint now and then\)/, /build nether_portal from obsidian on open, dry ground/,
       /portal light, then portal enter/, /12\. back in the Overworld: in the Nether, portal enter again/]) assert.match(s, how);
 
+    // live_view first, as the instructions say (play waits for it: NEED_LIVE_VIEW); the camera is not there, which counts
+    await c.callTool({ name: 'live_view', arguments: {} });
     // the report mid-game, then at the end, with the why texts and the attribution
     await c.callTool({ name: 'play', arguments: { skill: 'collect', args: { block: 'oak_log', n: 2 }, why: 'Logs first, for planks and a pickaxe' } });
     await c.callTool({ name: 'play_sequence', arguments: { steps: [{ skill: 'craft', args: { item: 'oak_planks', n: 4 } }, { skill: 'craft', args: { item: 'stick', n: 4 } }], why: 'Planks and sticks for the tools' } });

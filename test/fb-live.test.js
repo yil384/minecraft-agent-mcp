@@ -9,6 +9,7 @@
 // no command line, the live video ended with the game.
 
 import { test } from 'node:test';
+import vm from 'node:vm';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { execFileSync } from 'node:child_process';
@@ -34,6 +35,7 @@ async function until(fn, ms = 10_000) {
     await sleep(15);
   }
 }
+until.dbg = (ch, fn, ms) => until(fn, ms).catch((e) => { console.log('DBG', JSON.stringify(ch.live()), JSON.stringify(ch.list())); throw e; });
 const tmp = () => fs.mkdtempSync(path.join(os.tmpdir(), 'mcagent-fb-'));
 const SECRET_KEY = 'AbSecretStreamKey';
 
@@ -170,7 +172,7 @@ test('graph: the token only in the Authorization header; transient errors tried 
 
 test('channel: a game goes live when live_view asks for it (never because it started); the embed is Facebook\'s player for the video; the game\'s end ends the live video', async (t) => {
   const { fake, rows, streams, ch, dir } = await channelOn(t);
-  assert.deepEqual(ch.live(), { fb: true, channel: 'facebook', state: 'off', game: null, videoUrl: null, embedUrl: null, liveSince: null, warning: null, aspect: '16/9', games: 0, error: null, retryInS: null });
+  assert.deepEqual(ch.live(), { fb: true, channel: 'facebook', state: 'off', game: null, videoUrl: null, embedUrl: null, liveSince: null, videoId: null, owner: PAGE_ID, warning: null, aspect: '16/9', games: 0, error: null, retryInS: null });
   assert.deepEqual(ch.start('g1', { player: 'Bot_aaaa' }), { id: 'g1' });
   assert.equal(ch.start('g2', { player: 'not a name' }), null, 'a bad player name');
   await ch.settled();
@@ -210,46 +212,97 @@ test('channel: a game goes live when live_view asks for it (never because it sta
   noSecrets(fake, rows);
 });
 
-test('channel: several games, one camera: it films the game whose live_view came last and moves on when that game ends; one live video throughout', async (t) => {
+test('channel: one camera, first come, first served: the game that has it keeps it until it ends; the next in line (by its first live_view) gets it, with a live video of its own; games that ended are skipped', async (t) => {
   const { fake, rows, streams, ch } = await channelOn(t);
   ch.start('g1', { player: 'Bot_aaaa' });
   ch.focus('g1');
   await until(() => ch.live().state === 'live');
   ch.start('g2', { player: 'Bot_bbbb' });
+  ch.start('g3', { player: 'Bot_cccc' });
+  ch.start('g4', { player: 'Bot_dddd' });
   await ch.settled();
   assert.equal(ch.live().game, 'g1', 'a new game does not take the camera by itself');
+  // g3 asks before g2: the line is g3, g2; g2 asking again keeps its place
+  const q3 = ch.focus('g3');
   ch.focus('g2');
-  await until(() => ch.live().game === 'g2');
+  const q2 = ch.focus('g2');
   await ch.settled();
-  const s = streams.made[0];
-  assert.equal(s.calls.at(-1), 'follow Bot_bbbb');
-  const [id] = [...fake.videos.keys()];
-  await until(() => fake.videos.get(id).title === 'An AI agent plays Minecraft (game g2)');
-  ch.caption('g1', 'off camera');
-  ch.caption('g2', 'Crafting stick');
-  assert.deepEqual(s.captions, ['Crafting stick']);
-  ch.start('g3', { player: 'Bot_cccc' });
-  await ch.settled();
-  assert.equal(ch.live().game, 'g2');
-  await ch.stop('g2');
-  await until(() => ch.live().game === 'g1');
-  assert.equal(s.calls.at(-1), 'follow Bot_aaaa', 'back to the game that asked before; g3 never asked');
-  ch.focus('g3');
-  await until(() => s.calls.at(-1) === 'follow Bot_cccc');
-  await ch.stop('g3');
-  await until(() => s.calls.at(-1) === 'follow Bot_aaaa');
-  // live_view asked for a game the channel does not have yet: it gets the camera when it arrives
-  ch.focus('g4');
-  ch.start('g4', { player: 'Bot_dddd' });
-  await until(() => s.calls.at(-1) === 'follow Bot_dddd');
-  await ch.stop('g4');
-  await until(() => s.calls.at(-1) === 'follow Bot_aaaa');
+  assert.equal(ch.live().game, 'g1', 'a newcomer never takes the camera');
+  assert.deepEqual([q3.state, q3.queue.position], ['queued', 1]);
+  assert.deepEqual([q2.state, q2.queue.position, q2.game], ['queued', 2, 'g1']);
+  assert.ok(q2.queue.waitMin >= q3.queue.waitMin + 1, 'the wait adds up the games ahead');
+  assert.equal(ch.live('g1').state, 'live', 'the game on camera is not in line');
+  assert.equal(ch.live('g4').state, 'live', 'a game that never asked is not in line');
+  ch.caption('g2', 'off camera');
+  ch.caption('g1', 'Crafting stick');
+  assert.deepEqual(streams.made[0].captions, ['Crafting stick']);
+  const [first] = [...fake.videos.keys()];
+  // g1 ends: its live video ends, g3 (first in line) gets the camera and a live video of its own
   await ch.stop('g1');
+  await until(() => ch.live().game === 'g3' && ch.live().state === 'live');
+  assert.equal(fake.videos.get(first).status, 'VOD', 'the last game\'s live video ended');
+  assert.equal(fake.videos.size, 2, 'a live video per game');
+  assert.equal(streams.made[1].o.player, 'Bot_cccc');
+  assert.equal(ch.live('g2').queue.position, 1);
+  // g2 ends while in line: skipped; g3 ends: nobody left in line, the live video ends
+  await ch.stop('g2');
+  await ch.stop('g3');
   await until(() => ch.live().state === 'off');
-  assert.equal(fake.videos.size, 1, 'one live video for all of it');
-  assert.equal(streams.made.length, 1);
-  assert.ok(rows.filter((r) => r.k === 'fb_camera').length >= 5);
+  assert.equal(fake.videos.size, 2, 'no live video for a game that ended in line, none for one that never asked');
+  // live_view asked for a game the channel does not have yet: it is in line when it arrives
+  ch.start('g5', { player: 'Bot_eeee' });
+  ch.focus('g5');
+  await until(() => ch.live().state === 'live' && ch.live().game === 'g5');
+  ch.focus('g6');
+  ch.start('g6', { player: 'Bot_ffff' });
+  await ch.settled();
+  assert.deepEqual([ch.live('g6').state, ch.live('g6').queue.position, ch.live().game], ['queued', 1, 'g5']);
+  await ch.stop('g5');
+  await until(() => ch.live().game === 'g6' && ch.live().state === 'live');
+  await ch.stop('g6');
+  await until(() => ch.live().state === 'off');
+  assert.ok(rows.filter((r) => r.k === 'fb_live_stop').length >= 3);
   noSecrets(fake, rows);
+});
+
+test('channel: the camera\'s game making no call for 5 minutes while others wait goes to the back of the line; the owner\'s game (MCP_OWNER_KEY) takes the camera at once; a player\'s game takes it from a test\'s recording', async (t) => {
+  let clock = 0; // added to the real time: the 5 minutes pass at once
+  const { ch } = await channelOn(t, { now: () => Date.now() + clock, idleMs: 300_000, sweepMs: 20, record: { root: tmp() } });
+  ch.start('g1', { player: 'Bot_aaaa' });
+  ch.focus('g1');
+  await until.dbg(ch, () => ch.live().state === 'live');
+  ch.start('g2', { player: 'Bot_bbbb' });
+  ch.focus('g2');
+  await ch.settled();
+  // g1 keeps calling: no hand-over
+  clock += 200_000;
+  ch.term('g1', { lines: [{ k: 'call', t: '> play' }] });
+  clock += 200_000;
+  await sleep(80);
+  assert.equal(ch.live().game, 'g1', 'a call 3 min ago: still its camera');
+  // then 5 min without a call
+  clock += 301_000;
+  await until.dbg(ch, () => ch.live().game === 'g2');
+  assert.equal(ch.live('g1').queue.position, 1, 'the idle game waits behind');
+  // the owner's game: first in line, and it takes the camera from a player's game
+  ch.start('g9', { player: 'Bot_owner' });
+  const o = ch.focus('g9', { owner: true });
+  assert.notEqual(o.state, 'queued');
+  await until.dbg(ch, () => ch.live().game === 'g9');
+  assert.equal(ch.live('g2').queue.position, 1, 'the player it took the camera from is first in line again');
+  await ch.stop('g9');
+  await until.dbg(ch, () => ch.live().game === 'g2' && ch.live().state === 'live');
+  // a test's game filmed for the recording only gives the camera to a player's at once
+  await ch.stop('g2');
+  await ch.stop('g1');
+  await until.dbg(ch, () => ch.live().state === 'off');
+  ch.start('gt', { player: 'Tst_cam' });
+  ch.focus('gt', { local: true });
+  await until.dbg(ch, () => ch.live().state === 'recording');
+  ch.start('g7', { player: 'Bot_gggg' });
+  ch.focus('g7');
+  await until.dbg(ch, () => ch.live().game === 'g7');
+  assert.equal(ch.live('gt').state, 'queued', 'the test waits behind the player');
 });
 
 test('channel: the terminal of every game is kept; a stream that starts for a game, or a camera that moves to it, begins with its start_game, its last lines and its status', async (t) => {
@@ -274,18 +327,17 @@ test('channel: the terminal of every game is kept; a stream that starts for a ga
   ch.term('g1', { lines: [{ k: 'ok', t: 'new' }] });
   ch.term('g2', { lines: [{ k: 'ok', t: 'off camera' }] });
   assert.deepEqual(s.terms.at(-1).lines, [{ k: 'ok', t: 'new' }], 'the game on camera: its new lines only');
-  const before = s.terms.length;
-  ch.focus('g2');
-  await until(() => s.calls.at(-1) === 'follow Bot_bbbb', 30_000);
-  assert.equal(s.terms.length, before + 1);
-  assert.deepEqual(s.terms.at(-1).lines.map((l) => l.t), ['> start_game', 'advice: night in 45 s', '> live_view', 'off camera']);
-  assert.equal(s.terms.at(-1).status, 'HP 20/20  FOOD 20/20  DAY 12:00');
-  await ch.stop('g2');
-  await until(() => s.calls.at(-1) === 'follow Bot_aaaa', 30_000);
-  assert.deepEqual(s.terms.at(-1).lines.map((l) => l.t).slice(-2), ['line 45', 'new'], 'back to g1: its terminal again');
+  // g2 in line; g1 ends: the camera's stream for g2 begins with g2's terminal so far
+  assert.equal(ch.focus('g2').state, 'queued');
+  await ch.stop('g1');
+  await until(() => streams.made.length === 2 && streams.made[1].terms.length > 0, 30_000);
+  const s2 = streams.made[1];
+  assert.equal(s2.o.player, 'Bot_bbbb');
+  assert.deepEqual(s2.terms[0].lines.map((l) => l.t), ['> start_game', 'advice: night in 45 s', '> live_view', 'off camera']);
+  assert.equal(s2.terms[0].status, 'HP 20/20  FOOD 20/20  DAY 12:00');
   ch.term('g9', { lines: [{ k: 'call', t: 'x' }] });
   ch.term('bad id!', { lines: [{ k: 'call', t: 'x' }] });
-  await ch.stop('g1');
+  await ch.stop('g2');
 });
 
 test('channel: a failed create is tried again with a backoff; a failed stream or a live video Facebook ended is replaced while a game remains', async (t) => {
@@ -522,7 +574,10 @@ test('service and client: focus and /live over loopback; focus puts a game the c
   // the agent restarted the service's view of things: focus with the game's details puts it on the channel
   const f = await fetch(`${url}/streams/g7/focus`, { method: 'POST', body: JSON.stringify({ player: 'Bot_gggg' }) });
   assert.equal(f.status, 200);
-  await until(() => streams.made[0].calls.at(-1) === 'follow Bot_gggg');
+  assert.deepEqual(await f.json().then((j) => [j.state, j.queue?.position, j.game]), ['queued', 1, 'g1'], 'in line behind g1: the camera stays');
+  await until(() => ch.has('g7'));
+  assert.deepEqual(await (await fetch(`${url}/live?game=g7`)).json().then((j) => [j.state, j.queue?.position]), ['queued', 1]);
+  assert.deepEqual(streams.made[0].calls, ['start Bot_aaaa']);
   const bad = await fetch(`${url}/streams/g8/focus`, { method: 'POST', body: JSON.stringify({ player: 'Bot hhhh; op me' }) });
   assert.equal(bad.status, 400);
   // g1 is refreshed by the client and stays; g7 is not and leaves
@@ -544,38 +599,75 @@ test('service and client: focus and /live over loopback; focus puts a game the c
   } finally { plain.close(); }
 });
 
-test('live page: small, no request of its own, only Facebook\'s player (autoplay, muted), the reload watchdog and the sound hint; joining, live, waiting, off', () => {
+test('live page: small, no request of its own, only Facebook\'s player (autoplay, muted) and the reload watchdog; joining, live, waiting, off', () => {
   const embed = facebookEmbedUrl(`https://www.facebook.com/${PAGE_ID}/videos/7100000000001/`);
   const live = liveViewHtml({ state: 'live', game: 'g1a2b3c', camera: 'g1a2b3c', embedUrl: embed, fb: true });
-  assert.ok(Buffer.byteLength(live) < 3072, `${Buffer.byteLength(live)} bytes`);
+  assert.ok(Buffer.byteLength(live) < 6144, `${Buffer.byteLength(live)} bytes`);
   assert.match(live, /^<!doctype html>/);
   for (const banned of ['fetch', 'WebSocket', 'XMLHttpRequest', 'sendBeacon', 'http-equiv', 'javascript:', 'eval(', 'import(']) assert.equal(live.toLowerCase().includes(banned.toLowerCase()), false, banned);
   assert.doesNotMatch(live, /\son\w+=/i, 'no event handler attributes');
   const player = `${embed}&autoplay=true&mute=true`;
   const urls = live.match(/https?:\/\/[^"\s<]+/g);
   assert.deepEqual([...new Set(urls.map((u) => u.replace(/&amp;/g, '&')))], [player], 'one URL: the player, starting by itself and muted');
-  assert.ok(live.includes(`<iframe src="${player.replace(/&/g, '&amp;')}"`));
-  assert.match(live, /<b id="h">Tap the video for sound<\/b><\/div><div id="s"><p>Live: [^<]*<\/p><button id="r" type="button">Reload video<\/button><\/div>/, 'the hint over the game, the button under the player');
-  assert.match(live, /#h\{position:absolute;left:50%;top:max\(52px,9%\)/, 'the hint at the top: never over the panel');
+  assert.ok(live.includes(`data-src="${player.replace(/&/g, '&amp;')}"`));
+  assert.match(live, /<svg class="poster" [^>]*>[^]*AN AGENT PLAYS[^]*MINECRAFT[^]*LIVE[^]*game g1a2b3c<\/text>[^]*<\/svg><\/div><div id="s"><p>Live: [^<]*<\/p><button id="r" type="button">Reload video<\/button><\/div>/, 'the poster in the player\'s place, the button under it');
+  assert.doesNotMatch(live, /<iframe/, 'the player comes from the script, after the poster');
   const script = live.match(/<script>([\s\S]*)<\/script>/)[1];
   assert.match(script, /setInterval\(\(\)=>\{if\(!touched\)swap\(\);\},300000\)/, 'a fresh player every 5 min while untouched');
   assert.match(script, /if\(next\)next\.remove\(\)/, 'never more than two players');
   assert.match(script, /old\.remove\(\)/);
-  assert.match(live, /<p>Live: game g1a2b3c\. One camera films the game that asked for the live view last\.<\/p>/);
+  assert.match(live, /<p>Live: game g1a2b3c\. One camera, first come, first served\.<\/p>/);
   const joining = liveViewHtml({ state: 'connecting', game: 'g1a2b3c', embedUrl: embed, fb: true });
-  assert.match(joining, /<iframe/);
+  assert.match(joining, /data-src=/);
   assert.match(joining, /Joining: the live video of game g1a2b3c starts in a few seconds\./);
-  assert.equal(liveViewHtml({ state: 'starting', game: 'g1', embedUrl: null, fb: true }).includes('<iframe'), false);
+  assert.equal(liveViewHtml({ state: 'starting', game: 'g1', embedUrl: null, fb: true }).includes('data-src='), false);
   const waiting = liveViewHtml({ state: 'off', game: 'g1', embedUrl: embed, fb: true });
-  assert.equal(waiting.includes('<iframe'), false);
+  assert.equal(waiting.includes('data-src='), false);
   assert.match(waiting, /Waiting for the next game\./);
   assert.match(liveViewHtml({ state: 'off', fb: false }), /Live video is off on this server\./);
-  assert.equal(statusLine({ state: 'live', game: 'g1', camera: 'g2' }), 'Live: the camera is on game g2 now (it films the game that asked for the live view last).');
+  assert.equal(statusLine({ state: 'live', game: 'g1', camera: 'g2' }), 'Live: the camera is on game g2 now; game g1 is in line for it.');
   assert.equal(statusLine({ state: 'retrying', game: 'g1' }), 'Not live yet: the live video could not start; it is tried again by itself.');
   // anything but Facebook's player, or a strange game id, stays out
-  assert.equal(liveViewHtml({ state: 'live', game: 'g1', embedUrl: 'https://evil.example/plugins/video.php?href=x' }).includes('<iframe'), false);
+  assert.equal(liveViewHtml({ state: 'live', game: 'g1', embedUrl: 'https://evil.example/plugins/video.php?href=x' }).includes('data-src='), false);
   assert.equal(isPlayerUrl('https://www.facebook.com/plugins/video.php?href=x#y'), false);
   assert.equal(liveViewHtml({ state: 'live', game: '<b>x</b>', embedUrl: embed }).includes('<b>'), false);
+});
+
+test('live page: the poster first (a client\'s card), the player 2.5 s later or at a tap, see-through until loaded; the watchdog as before: a fresh player every 5 min until the viewer taps it, Reload at once', () => {
+  const embed = facebookEmbedUrl(`https://www.facebook.com/${PAGE_ID}/videos/7100000000001/`);
+  const page = liveViewHtml({ state: 'live', game: 'g1', camera: 'g1', embedUrl: embed, fb: true });
+  assert.doesNotMatch(page, /Tap the video|id="h"|id="k"|for sound/);
+  const script = page.match(/<script>([\s\S]*)<\/script>/)[1];
+  // a small DOM and clock: enough for the page's script
+  const run = () => {
+    let now = 0; const timers = []; let seq = 0;
+    const later = (fn, ms, every = 0) => { const id = ++seq; timers.push({ id, at: now + ms, fn, every }); return id; };
+    const tick = (ms) => { const end = now + ms; for (;;) { timers.sort((x, y) => x.at - y.at); const x = timers[0]; if (!x || x.at > end) break; now = x.at; if (x.every) x.at += x.every; else timers.shift(); x.fn(); } now = end; };
+    const drop = (id) => { const i = timers.findIndex((x) => x.id === id); if (i >= 0) timers.splice(i, 1); };
+    const made = [];
+    const el = (tag) => ({ tagName: tag, style: {}, remove() { this.gone = true; } });
+    const nodes = { v: { dataset: { src: 'x' }, appendChild: (f) => made.push(f), querySelectorAll: () => made.filter((f) => !f.gone) }, r: {} };
+    const win = {};
+    const document = { activeElement: null, getElementById: (id) => nodes[id], createElement: (tag) => el(tag.toUpperCase()), querySelector: () => null };
+    vm.runInNewContext(script, { document, setTimeout: (fn, ms) => later(fn, ms), clearTimeout: drop, setInterval: (fn, ms) => later(fn, ms, ms), clearInterval: drop, addEventListener: (type, fn) => { win[type] = fn; } });
+    return { made, nodes, win, document, tick };
+  };
+  let p = run();
+  p.tick(2_400); assert.equal(p.made.length, 0, 'the poster alone at first (the card thumbnail)');
+  p.tick(200); assert.equal(p.made.length, 1, 'the player at 2.5 s');
+  assert.equal(p.made[0].style.opacity, '0', 'see-through until it has loaded: a frame that cannot load never shows');
+  p.made[0].onload(); p.tick(900); assert.equal(p.made[0].style.opacity, '1', 'shown once loaded');
+  p.tick(300_000); assert.equal(p.made.length, 2, 'a fresh player at 5 min');
+  p.made[1].onload(); p.tick(2_600); assert.equal(p.made[1].style.opacity, '1', 'cross-faded in'); p.tick(1_000); assert.ok(p.made[0].gone, 'the old one out');
+  p.nodes.r.onclick(); assert.equal(p.made.length, 3, 'Reload video: at once');
+  // a tap: the player at once
+  p = run();
+  p.win.pointerdown(); assert.equal(p.made.length, 1); p.tick(5_000); assert.equal(p.made.length, 1, 'once');
+  // a tap into the player: never replaced
+  p = run();
+  p.tick(3_000); p.made[0].onload(); p.tick(1_000);
+  p.document.activeElement = p.made[0]; p.win.blur(); p.tick(1);
+  p.tick(900_000); assert.equal(p.made.length, 1, 'a player the viewer tapped is never replaced');
 });
 
 test('MCP live_view with the channel: called before the stream is up it waits for Facebook, then answers with the page and a plain link; the one camera is said plainly', async (t) => {
@@ -595,10 +687,10 @@ test('MCP live_view with the channel: called before the stream is up it waits fo
   assert.ok(Date.now() - t0 < 15_000);
   const v = [...fake.videos.values()][0];
   const video = `https://www.facebook.com/${PAGE_ID}/videos/${v.videoId}/`;
-  assert.match(txt, new RegExp(`^Live view of game ${game}: live on Facebook since \\d\\d:\\d\\d:\\d\\d UTC\\.\\nVideo \\(plain link\\): ${video.replace(/[./]/g, '\\$&')}\\nOne camera serves every game on this server: it films the game whose live_view call came last`));
+  assert.match(txt, new RegExp(`^Live view of game ${game}: live on Facebook since \\d\\d:\\d\\d:\\d\\d UTC\\.\\nVideo \\(plain link\\): ${video.replace(/[./]/g, '\\$&')}\\nOne camera serves every game on this server, first come, first served: it stays on a game until that game ends`));
   assert.ok(txt.includes('\nHTML page (Facebook\'s video player and a status line; a small script reloads the player, no request of its own):\n<!doctype html>'));
   assert.deepEqual({ ...r.structuredContent, html: undefined }, { format: 'html', game, state: 'live', live: true, camera_game: game, video_url: video, embed_url: facebookEmbedUrl(video), html: undefined });
-  assert.ok(r.structuredContent.html.includes(`<iframe src="${`${facebookEmbedUrl(video)}&autoplay=true&mute=true`.replace(/&/g, '&amp;')}"`));
+  assert.ok(r.structuredContent.html.includes(`data-src="${`${facebookEmbedUrl(video)}&autoplay=true&mute=true`.replace(/&/g, '&amp;')}"`));
   const embed = JSON.parse((await c.callTool({ name: 'live_view', arguments: { format: 'embed' } })).content[0].text);
   assert.deepEqual(embed, { format: 'embed', game, live: true, state: 'live', camera_game: game, player: 'facebook', embed_url: facebookEmbedUrl(video), video_url: video });
   // the game ends: its body's end takes it off the channel (the agent hands the channel the body), and the live video ends
@@ -606,6 +698,67 @@ test('MCP live_view with the channel: called before the stream is up it waits fo
   await ch.stop(game, 'the game ended');
   await until(() => ch.live().state === 'off');
   assert.equal(v.status, 'VOD');
+});
+
+test('MCP live_view, two players: the second is told its place in line (and its play is no longer refused), its page a card with no player; the owner (MCP_OWNER_KEY on the URL) takes the camera; the key in no log', async (t) => {
+  const { fake, ch } = await channelOn(t);
+  const dir = tmp();
+  const KEY = 'ownerkey-0123456789abcdef';
+  const config = loadConfig({ WEB_HOST: '127.0.0.1', WEB_PORT: '0', LOG_DIR: dir, MCP_OWNER_KEY: KEY, STREAM_LOGO: 'plain', WEB_MAX_SESSIONS: '8', WEB_MCP_GAMES_PER_ADDRESS: '8' });
+  const agent = await startAgent({ config, fakeBot: true, print: () => {}, loadViewer: () => null, streams: ch, loopStatsMs: 0 });
+  const clients = [];
+  const connect = async (name, suffix = '') => { const c = new Client({ name, version: '1' }); clients.push(c); await c.connect(new StreamableHTTPClientTransport(new URL(`${agent.url}/mcp${suffix}`))); return c; };
+  t.after(async () => { for (const c of clients) await c.close().catch(() => {}); await agent.stop('test over'); fs.rmSync(dir, { recursive: true, force: true }); });
+  const start = async (c, player) => { const g = /game (g\w+)/.exec((await c.callTool({ name: 'start_game', arguments: { adult: true } })).content[0].text)[1]; ch.start(g, { player }); return g; };
+  const a = await connect('fb-player-a');
+  const ga = await start(a, 'Bot_aaaa');
+  await a.callTool({ name: 'live_view', arguments: {} });
+  await until(() => ch.live().state === 'live' && ch.live().game === ga);
+  const b = await connect('fb-player-b');
+  const gb = await start(b, 'Bot_bbbb');
+  // before live_view: play is refused (NEED_LIVE_VIEW); a live_view in line counts
+  assert.equal((await b.callTool({ name: 'play', arguments: { skill: 'collect', args: { block: 'oak_log', n: 1 }, why: 'w', plan: 'p' } })).structuredContent?.code, 'NEED_LIVE_VIEW');
+  const t0 = Date.now();
+  const r = await b.callTool({ name: 'live_view', arguments: {} });
+  assert.ok(Date.now() - t0 < 5_000, 'said at once, no wait for a live video');
+  const txt = r.content[0].text;
+  assert.match(txt, new RegExp(`^Live view of game ${gb}: the camera is filming another game right now; yours runs normally\\. You are number 1 in line \\(about \\d+ min\\)\\. Call live_view again later, or keep playing: when the camera reaches you, your stream starts\\.`));
+  assert.deepEqual([r.structuredContent.state, r.structuredContent.queue.position, r.structuredContent.camera_game, r.structuredContent.live], ['queued', 1, ga, false]);
+  const html = r.structuredContent.html;
+  assert.doesNotMatch(html, /data-src=/, 'no player while in line');
+  assert.match(html, /IN LINE FOR THE CAMERA[^]*#1/);
+  // the server's images by the game's secret view id (never the game id: the stream shows that)
+  const vb = new RegExp('data-st="http://127\\.0\\.0\\.1:\\d+/live/([A-Za-z0-9_-]{22})/"').exec(html)?.[1];
+  assert.ok(vb, 'the page asks under the view id');
+  assert.equal((await fetch(`${agent.url}/live/${gb}/state.svg`)).status, 404, 'the game id opens nothing');
+  assert.ok(html.includes(`data-tpl="https://www.facebook.com/plugins/video.php?href=https%3A%2F%2Fwww.facebook.com%2F${PAGE_ID}%2Fvideos%2FVIDEOID%2F`), 'the player template for the owner\'s videos');
+  assert.notEqual((await b.callTool({ name: 'play', arguments: { skill: 'collect', args: { block: 'oak_log', n: 1 }, why: 'w', plan: 'p' } })).structuredContent?.code, 'NEED_LIVE_VIEW', 'live_view in line counts');
+  assert.equal(ch.live().game, ga, 'the camera stayed');
+  // the server's images: b is not on camera (1 px); once a's game ends, b's turn: 3 px and its live video's id
+  assert.match(await (await fetch(`${agent.url}/live/${vb}/state.svg`)).text(), /width="1"/);
+  await a.callTool({ name: 'end_game', arguments: {} });
+  await ch.stop(ga, 'the game ended');
+  await until(() => ch.live().state === 'live' && ch.live().game === gb);
+  await sleep(2_100); // the server's 2 s cache
+  assert.match(await (await fetch(`${agent.url}/live/${vb}/state.svg`)).text(), /width="3"/);
+  const vid = [...fake.videos.values()].at(-1).videoId;
+  let digits = '';
+  for (const k of [0, 1, 2]) { const m = /width="(\d+)" height="(\d+)"/.exec(await (await fetch(`${agent.url}/live/${vb}/v${k}.svg`)).text()); digits += String(m[1] - 1).padStart(4, '0') + String(m[2] - 1).padStart(4, '0'); }
+  assert.equal(digits.replace(/^0+/, ''), String(vid), 'the live video\'s id in the images');
+  // the owner: with the key on the URL its game takes the camera from b's at once
+  const o = await connect('fb-owner', `?owner=${KEY}`);
+  const go = await start(o, 'Bot_oooo');
+  await o.callTool({ name: 'live_view', arguments: {} });
+  await until(() => ch.live().game === go);
+  assert.equal(ch.live(gb).queue.position, 1, 'b first in line again');
+  // a wrong key is nobody
+  const x = await connect('fb-x', '?owner=wrong-key-0123456789');
+  const gx = await start(x, 'Bot_xxxx');
+  assert.equal((await x.callTool({ name: 'live_view', arguments: {} })).structuredContent.state, 'queued');
+  assert.equal(ch.live(gx).queue.position, 2);
+  for (const f of fs.readdirSync(dir)) assert.equal(fs.readFileSync(path.join(dir, f), 'utf8').includes(KEY), false, `the key in ${f}`);
+  assert.equal(JSON.stringify(config).includes(KEY), false, 'the key never printed with the settings');
+  assert.throws(() => loadConfig({ MCP_OWNER_KEY: 'short' }), /MCP_OWNER_KEY must be at least 16/);
 });
 
 test('MCP live_view: not live within the wait, it says so and when to ask again; the page shows "joining"', async (t) => {
@@ -622,7 +775,7 @@ test('MCP live_view: not live within the wait, it says so and when to ask again;
   const txt = r.content[0].text;
   assert.match(txt, new RegExp(`^Live view of game ${game}: the live video is starting but was not live after \\d s\\. Call live_view again in about 20 s for a page that shows it live\\.\\nVideo \\(plain link\\): https://www\\.facebook\\.com/`));
   assert.equal(r.structuredContent.live, false);
-  assert.match(r.structuredContent.html, /<iframe src="https:\/\/www\.facebook\.com\/plugins\/video\.php\?href=/);
+  assert.match(r.structuredContent.html, /data-src="https:\/\/www\.facebook\.com\/plugins\/video\.php\?href=/);
   assert.match(r.structuredContent.html, /Joining: the live video of game g\w+ starts in a few seconds\./);
 });
 
@@ -644,7 +797,7 @@ test('MCP live_view: a refusal the channel waits out is said at once, with the r
   assert.ok(Date.now() - t0 < 5_000, 'no 40 s wait for a try ten minutes away');
   assert.match(r.content[0].text, new RegExp(`^Live view of game ${game}: not live: the live video could not start \\(Facebook says the Page is not eligible to go live yet: a profile or Page must be at least 60 days old \\(code 200/1363120\\)\\)\\. It is tried again by itself in \\d+ s; call live_view again after that\\.\nOne camera serves every game`));
   assert.match(r.structuredContent.html, /<p>Not live yet: the live video could not start; it is tried again by itself\.<\/p>/);
-  assert.equal(r.structuredContent.html.includes('<iframe'), false);
+  assert.equal(r.structuredContent.html.includes('data-src='), false);
 });
 
 test('config: LIVE_VIEW=facebook turns the channel on; the camera needs the token file (and the Page id for a Page); FB_* checked', () => {
@@ -747,7 +900,7 @@ test('a test caller (TEST SCRIPT) spends no Facebook live: the same answer shape
   assert.match(r.content[0].text, new RegExp(`^Live view of game ${game}: test caller: no Facebook live .*The game itself works\\.\\n\\nHTML page`));
   assert.deepEqual({ ...r.structuredContent, html: undefined }, { format: 'html', game, state: 'test', live: false, camera_game: null, video_url: null, embed_url: null, html: undefined });
   assert.match(r.structuredContent.html, /<p>Test caller: no Facebook live for game g\w+ \(tests never use the live videos a day\)\. The game goes on\.<\/p>/);
-  assert.doesNotMatch(r.structuredContent.html, /<iframe/);
+  assert.doesNotMatch(r.structuredContent.html, /data-src=/);
   const embed = JSON.parse((await c.callTool({ name: 'live_view', arguments: { format: 'embed' } })).content[0].text);
   assert.deepEqual([embed.state, embed.live, embed.embed_url], ['test', false, null]);
   await new Promise((res) => { setTimeout(res, 300); });

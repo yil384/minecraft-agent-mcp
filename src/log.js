@@ -35,7 +35,7 @@ export function createLogger(opts = {}) {
   const keep = opts.keep ?? 200;
   // stream URLs hold stream keys: the whole URL and the key alone are both secrets
   const streamKeys = (cfg.stream?.outputs ?? []).flatMap((u) => [u, u.split('/').pop()?.split('?')[0]]);
-  const secrets = [cfg.web?.adminToken, cfg.web?.accessKey, cfg.web?.watchKey, cfg.web?.proxySecret, cfg.stream?.serviceToken, ...streamKeys];
+  const secrets = [cfg.web?.adminToken, cfg.web?.accessKey, cfg.web?.watchKey, cfg.web?.proxySecret, cfg.web?.ownerKey, cfg.stream?.serviceToken, ...streamKeys];
   const file = dir ? path.join(dir, `run-${runId.replace(/[^A-Za-z0-9_.-]/g, '_')}.jsonl`) : null;
   if (file) fs.mkdirSync(dir, { recursive: true });
 

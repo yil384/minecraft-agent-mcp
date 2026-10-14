@@ -34,6 +34,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends git ca-certific
  && mkdir -p /console && chmod 1777 /console
 COPY src ./src
 COPY scripts ./scripts
+# the logo for the HUD and the live page's poster (STREAM_LOGO=plain; off by default)
+COPY assets/brand ./assets/brand
 ENV BODY=mineai MINEAI_DIR=/opt/mine-ai-mcp MINEAI_RUNTIME=bun MINEAI_EXEC=/usr/local/bin/bun \
     WEB_HOST=0.0.0.0 WEB_PORT=8787 LOG_DIR=/logs NODE_ENV=production HOME=/tmp
 EXPOSE 8787

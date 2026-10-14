@@ -32,8 +32,12 @@ import { createGraph, createLiveChannel } from './fb-live.js';
 import { createLocalChannel } from './live-local.js';
 import { createTerminalPanel, findMonoFont } from './terminal-panel.js';
 import { createUiPanel, UI_ASSETS } from './ui-panel.js';
+import { createRecording, cleanupRecordings, cleanArgs } from './recorder.js';
 
 const require = createRequire(import.meta.url);
+
+/** The client's size in film mode (CAMERA_FILM=on), for the clean recording. */
+export const FILM_SIZE = Object.freeze([1920, 1080]);
 
 export const CAMERA_DEFAULTS = Object.freeze({
   mcDir: '/opt/mc', // docker/camera/install-client.mjs: the client, its libraries and launch.json
@@ -682,12 +686,18 @@ export function createCameraStream(o) {
     // (src/ui-panel.js), redrawn 30 times a second
     try {
       const [uw, uh] = String(opt.uiSize ?? '1080x1080').split('x').map(Number);
-      // the whole 16:9 game on top, the command area under it (472 px of the square), and a
-      // see-through band of 72 px over the game's bottom for the milestone toast
+      // the whole 16:9 game on top, the command area under it (472 px of the square). Concept B
+      // (STREAM_HUD=b, the default) draws over the whole game too (its toasts, floaters, banners, the hotbar): the
+      // panel is the whole frame, see-through over the game; the design before it had a band of 72 px over the game
       const top = Math.round((uw * 9) / 16 / 2) * 2;
       const ph = uh - top;
+      const design = opt.hud === 'final' ? 'final' : 'b';
       try { shm = fs.mkdtempSync(path.join(opt.shmDir ?? '/dev/shm', 'hud-')); } catch { shm = null; }
-      panel = createUiPanel({ width: uw, height: ph, over: 72, file: path.join(shm ?? work, 'panel.bmp'), fps: opt.fps, assets: opt.uiAssets ?? UI_ASSETS, ...(opt.uiNow ? { now: opt.uiNow } : {}) });
+      panel = createUiPanel({
+        width: uw, height: ph, over: design === 'b' ? top : 72, design, logo: opt.logo && opt.logo !== 'off' ? { style: opt.logo, file: opt.logoFile || '' } : null, file: path.join(shm ?? work, 'panel.bmp'), fps: opt.fps, assets: opt.uiAssets ?? UI_ASSETS, ...(opt.uiNow ? { now: opt.uiNow } : {}),
+        // what B put over the video, with its times: in the recording's hud.jsonl, so the film can draw it again
+        onEvent: (ev) => { try { rec?.event(ev, ev.gs ?? null); } catch { /* best effort */ } },
+      });
       panel.top = top;
       panel.kind = 'ui';
       panel.write(); // ffmpeg opens the file at its start
@@ -711,6 +721,14 @@ export function createCameraStream(o) {
       panel = null;
     }
   }
+  // the recording (RECORD=on: src/recorder.js): the game's folder, the part being written, the clean recorder
+  const recOpt = opt.record && opt.record.root ? opt.record : null;
+  let recGame = recOpt?.game ?? null;
+  let rec = null;
+  let part = null; // {n, clean, stream, flv, tee, child}
+  let snapTimer = null;
+  const recordOnly = opt.output === 'record'; // no live video: the composited stream goes to the recording
+  if (recordOnly && !recOpt) throw new Error('output "record" needs a recording folder (RECORD=on)');
   let state = 'idle';
   let enc = null; // {child, startedAt, err, progress}
   let follower = null;
@@ -737,12 +755,15 @@ export function createCameraStream(o) {
     const sound = opt.gameAudio === false ? null : rig.sound ?? null;
     const music = opt.music === false ? null : opt.musicFile || path.join(opt.uiAssets ?? UI_ASSETS, 'music', 'etirwer.m4a');
     const audio = { pulse: sound?.source ?? null, music: music && fs.existsSync(music) ? music : null, musicDb: opt.musicDb, gameDb: opt.gameDb };
+    const p = recOpt ? startPart(ro, sound, recordOnly ? 'record' : 'live') : null;
+    if (p) part = p;
+    const output = recordOnly ? p.stream : opt.output;
     const args = ffmpegArgs({
-      ...opt, ...size, font, captionFile, x11: x11Input(ro), progress: true, audio,
+      ...opt, output, ...size, font, captionFile, x11: x11Input(ro), progress: true, audio,
       ...(panel ? { panel: { file: panel.file, top: panel.top, kind: panel.kind ?? 'terminal', fps: panel.kind === 'ui' ? opt.fps : undefined, over: panel.over ?? 0 } } : {}),
     });
     const { child, failure } = spawnEncoder({
-      ffmpeg, args, output: opt.output, nice: opt.encoderNice, stdio: ['ignore', 'pipe', 'pipe'],
+      ffmpeg, args, output, nice: opt.encoderNice, stdio: ['ignore', 'pipe', 'pipe'], ...(p && !recordOnly ? { tee: p.flv } : {}),
       env: encoderEnv(opt, { DISPLAY: `:${ro.display}`, ...(sound ? { PULSE_SERVER: sound.server } : {}) }), event: (k, d) => event(k, d), createPublisher: opt.createPublisher,
     });
     if (!enc) event('stream_audio', { game: Boolean(audio.pulse), music: Boolean(audio.music) });
@@ -762,6 +783,7 @@ export function createCameraStream(o) {
     child.on('error', (err) => { me.err += String(err?.message ?? err); });
     child.on('exit', (code, signal) => {
       if (enc === me) enc = null;
+      if (p) { endPart(p); if (part === p) part = null; }
       if (!running()) return;
       const detail = clip(scrubOutputs(failure() ?? me.err, [opt.output]).split('\n').filter(Boolean).slice(-3).join(' | '));
       event('stream_ffmpeg_exit', { code, signal, detail });
@@ -770,6 +792,74 @@ export function createCameraStream(o) {
       setTimeout(() => { if (running() && !enc) startEncoder(); }, wait).unref?.();
     });
   }
+
+  // ----- the recording
+  // the game's folder, made on the first part (old recordings out first)
+  function ensureRec(ro) {
+    if (rec || !recGame) return rec;
+    const removed = cleanupRecordings(recOpt.root, { maxBytes: recOpt.maxBytes, keepDays: recOpt.keepDays, keep: recGame });
+    if (removed.length) event('record_cleanup', { removed: removed.length });
+    rec = createRecording({ root: recOpt.root, game: recGame, settings: { fps: opt.fps, client: `${ro.width}x${ro.height}`, stream: `${size.width}x${size.height}`, crf: recOpt.crf ?? 18 } });
+    clearInterval(snapTimer);
+    snapTimer = setInterval(() => { try { rec?.snap(panel?.hud?.().state ?? null, panel?.gameS ?? null); } catch { /* best effort */ } }, 30_000);
+    snapTimer.unref?.();
+    return rec;
+  }
+  // a part: the stream's own file (or none, kind "moved": the camera came to this game mid-stream) and the clean game
+  function startPart(ro, sound, kind) {
+    try {
+      if (!ensureRec(ro)) return null;
+      const p = { ...rec.part(kind), rec, kind };
+      startClean(p, ro, sound);
+      event('record_start', { game: recGame, part: p.n, kind, dir: rec.dir });
+      return p;
+    } catch (err) {
+      event('record_error', { what: 'the recording', message: clip(err?.message ?? err) });
+      return null;
+    }
+  }
+  // the game alone, with its sound: a second ffmpeg on the same display, below the live's priority
+  function startClean(p, ro, sound) {
+    const args = cleanArgs({ display: x11Input(ro).display, width: ro.width, height: ro.height, fps: opt.fps, pulse: sound?.source ?? null, crf: recOpt.crf ?? 18, preset: recOpt.preset ?? 'veryfast', threads: recOpt.threads ?? 2, out: p.clean });
+    try {
+      p.child = spawnNiced(ffmpeg, args, recOpt.nice ?? 10, { stdio: ['ignore', 'ignore', 'pipe'], env: encoderEnv(opt, { DISPLAY: `:${ro.display}`, ...(sound ? { PULSE_SERVER: sound.server } : {}) }) });
+      p.child.on('error', () => {});
+      p.child.stderr?.on('data', (d) => { p.err = (`${p.err ?? ''}${d}`).slice(-1_000); });
+    } catch (err) { event('record_error', { what: 'the clean recording', message: clip(err?.message ?? err) }); }
+  }
+  function stopClean(p) {
+    const c = p.child;
+    if (!alive(c)) return Promise.resolve();
+    c.kill('SIGINT'); // ffmpeg finishes the file
+    const t = setTimeout(() => { if (alive(c)) c.kill('SIGKILL'); }, 8_000);
+    t.unref?.();
+    return new Promise((r) => c.once('exit', () => { clearTimeout(t); r(); }));
+  }
+  // a part ends: the clean recorder stops, the stream's own bytes (FLV) become an MP4, meta.json gets the sizes
+  function endPart(p) {
+    if (!p || p.ended) return;
+    p.ended = true;
+    stopClean(p).then(() => {
+      const done = (extra = {}) => {
+        p.rec.endPart(p.n, extra);
+        event('record_stop', { game: p.rec.dir.split(path.sep).pop(), part: p.n, ...(p.err && /\S/.test(p.err) ? { detail: clip(p.err, 200) } : {}) });
+      };
+      if (p.kind === 'live' && fs.existsSync(p.flv)) {
+        const m = spawnNiced(ffmpeg, ['-hide_banner', '-loglevel', 'error', '-nostdin', '-i', p.flv, '-c', 'copy', '-movflags', '+faststart', '-y', p.stream], 15, { stdio: 'ignore' });
+        m.on('exit', (code) => { if (code === 0) fs.rm(p.flv, { force: true }, () => {}); done(code === 0 ? {} : { streamFlv: path.basename(p.flv) }); });
+        m.on('error', () => done({ streamFlv: path.basename(p.flv) }));
+      } else done(p.kind === 'moved' ? { stream: null, note: 'the camera came to this game mid-stream: the stream is in the folder of the game it began with' } : {});
+    });
+  }
+  function closeRecording() {
+    clearInterval(snapTimer);
+    snapTimer = null;
+    for (const p of moved) endPart(p); // the stream's own part ends when its ffmpeg exits (the tee is written to the end)
+    moved.length = 0;
+    rec?.close();
+    rec = null;
+  }
+  const moved = []; // the parts begun when the camera came to another game mid-stream
 
   async function stopEncoder() {
     const e = enc;
@@ -796,8 +886,10 @@ export function createCameraStream(o) {
       if (ticks % 12 !== 1) return; // the first live tick sets the baseline, then a report every 60 s
       const s = await rig.stats({ resources: true });
       const f = await processTree(enc?.child.pid);
+      const rc = [part, ...moved].find((x) => alive(x?.child))?.child;
+      const r = rc ? await processTree(rc.pid) : null; // the clean recording's ffmpeg
       const p = enc?.progress ?? {};
-      const now = { at: Date.now(), c: s.clientTree?.cpuSec ?? 0, x: s.xvfbTree?.cpuSec ?? 0, f: f?.cpuSec ?? 0, frame: Number(p.frame) || 0 };
+      const now = { at: Date.now(), c: s.clientTree?.cpuSec ?? 0, x: s.xvfbTree?.cpuSec ?? 0, f: f?.cpuSec ?? 0, r: r?.cpuSec ?? 0, frame: Number(p.frame) || 0 };
       if (last) {
         const sec = (now.at - last.at) / 1000;
         const pct = (a, b) => Math.round(((a - b) / sec) * 100);
@@ -805,6 +897,7 @@ export function createCameraStream(o) {
           clientFps: s.clientFps, captureFps: Math.round(((now.frame - last.frame) / sec) * 10) / 10, dup: Number(p.dup_frames) || 0, drop: Number(p.drop_frames) || 0,
           speed: p.speed ?? null, clientCpu: pct(now.c, last.c), clientMB: s.clientTree ? Math.round(s.clientTree.rssMB) : null,
           xvfbCpu: pct(now.x, last.x), ffmpegCpu: pct(now.f, last.f), ffmpegMB: f ? Math.round(f.rssMB) : null, camera: s.state,
+          ...(recOpt ? { recordCpu: r && last.r ? pct(now.r, last.r) : null, recordMB: r ? Math.round(r.rssMB) : null, recordOnly } : {}),
           // the HUD (src/ui-panel.js perf): its drawings and files written, a drawing's time, an input's lag to its drawing
           ...(typeof panel?.perf === 'function' ? { hud: panel.perf() } : {}),
         });
@@ -824,6 +917,7 @@ export function createCameraStream(o) {
   async function teardown() {
     clearInterval(follower);
     clearInterval(watchdog);
+    setTimeout(closeRecording, 0);
     offJoined?.();
     panel?.stop();
     await stopEncoder();
@@ -873,10 +967,22 @@ export function createCameraStream(o) {
      * Ride along with another player from now on (the live channel follows another game): the camera moves into that
      * bot's head, the caption is cleared, the broadcast goes on without a break.
      */
-    async follow(player) {
+    async follow(player, game = null) {
       if (!validName(player)) throw new Error('the camera needs the bot\'s player name');
       if (player === opt.player) return;
       opt.player = player;
+      // the recording goes on in the new game's folder (the stream's own file stays with the game it started for)
+      if (recOpt && game && game !== recGame) {
+        rec?.hud({ moved: game });
+        if (part) stopClean(part); // its stream file goes on to the stream's end
+        for (const p of moved) endPart(p);
+        moved.length = 0;
+        clearInterval(snapTimer);
+        rec?.close();
+        rec = null;
+        recGame = game;
+        if (state === 'live') { const p = startPart(rig.options, rig.sound ?? null, 'moved'); if (p) moved.push(p); }
+      }
       lastPose = null;
       this.caption('');
       panel?.reset('the camera moved to another game');
@@ -894,6 +1000,7 @@ export function createCameraStream(o) {
     /** The terminal under the game (the vertical layout): new lines ({k, t}) and the status line. */
     term(u) {
       if (!panel || !u) return;
+      try { rec?.hud(u, panel.gameS ?? null); } catch { /* best effort */ }
       if (typeof panel.term === 'function') { panel.term(u); return; } // the UI panel: lines, status numbers, advice
       if (Array.isArray(u.lines) && u.lines.length) panel.push(u.lines);
       if (typeof u.status === 'string' && u.status) panel.status(u.status);
@@ -924,10 +1031,12 @@ export function createCameraStream(o) {
 
 /** The camera options from config (config.stream.camera, config.mc). */
 export function cameraOptions(config) {
-  const { scale = 1, ...cam } = config?.stream?.camera ?? {};
-  // the client draws at 1280x720 times CAMERA_SCALE (llvmpipe's cost); ffmpeg scales the video up to 1280x720
+  const { scale = 1, film = false, ...cam } = config?.stream?.camera ?? {};
+  // the client draws at 1280x720 times CAMERA_SCALE (llvmpipe's cost); ffmpeg scales the video up to 1280x720. The
+  // film mode (CAMERA_FILM=on): 1920x1080, for the clean recording; the live is scaled down from it
   const size = (n) => Math.round((n * scale) / 2) * 2;
-  return defined({ ...cam, width: size(CAMERA_DEFAULTS.width), height: size(CAMERA_DEFAULTS.height), server: `${config?.mc?.host ?? '127.0.0.1'}:${config?.mc?.port ?? 25565}` });
+  const [width, height] = film ? FILM_SIZE : [size(CAMERA_DEFAULTS.width), size(CAMERA_DEFAULTS.height)];
+  return defined({ ...cam, width, height, server: `${config?.mc?.host ?? '127.0.0.1'}:${config?.mc?.port ?? 25565}` });
 }
 
 /**
@@ -969,6 +1078,11 @@ export function createCameraPool({ count = 1, camera = {}, log, createRig = crea
   };
 }
 
+/** The recording's options for the streams (RECORD=on), with its folder made. */
+export function recordOptions(r) {
+  try { fs.mkdirSync(r.root, { recursive: true }); } catch { /* said when the first recording fails */ }
+  return { root: r.root, maxBytes: r.maxBytes, keepDays: r.keepDays, crf: r.crf, preset: r.preset, nice: r.nice };
+}
 /**
  * The camera's manager. LIVE_VIEW=facebook: the Facebook live channel (src/fb-live.js): one camera, every game on one
  * channel, each broadcast a live video of the operator's profile or Page. LIVE_VIEW=local: the local watch page's
@@ -979,7 +1093,8 @@ export function createCameraPool({ count = 1, camera = {}, log, createRig = crea
 export function createCameraManager({ config, log, createRig, graph = null, gameTtlMs = 0 } = {}) {
   if (config.fb?.live || config.stream?.hls) {
     const pool = createCameraPool({ count: 1, camera: cameraOptions(config), log, createRig });
-    const common = { createStream: (opts) => pool.create(opts), streamOptions: managerConfig(config.stream).options, log, gameTtlMs, aspect: streamAspect(config.stream) };
+    // leaseMs: a game's longest life (GAME_LEASE_MIN), for the wait in line for the camera
+    const common = { createStream: (opts) => pool.create(opts), streamOptions: managerConfig(config.stream).options, log, gameTtlMs, aspect: streamAspect(config.stream), leaseMs: config.web?.leaseMs };
     const channel = config.fb?.live ? createLiveChannel({
       ...common,
       graph: graph ?? createGraph({
@@ -989,7 +1104,8 @@ export function createCameraManager({ config, log, createRig, graph = null, game
       title: config.fb.title, description: config.fb.description, installId: config.fb.installId, stateFile: config.fb.stateFile,
       deleteAfter: config.fb.deleteAfter, privacy: config.fb.target === 'me' ? config.fb.privacy : null,
       maxPerHour: config.fb.maxPerHour, maxPerDay: config.fb.maxPerDay, deleteDelayMs: config.fb.deleteDelayS * 1000,
-    }) : createLocalChannel({ ...common, dir: config.stream.hlsDir });
+      record: config.record?.on ? recordOptions(config.record) : null,
+    }) : createLocalChannel({ ...common, dir: config.stream.hlsDir, record: config.record?.on ? recordOptions(config.record) : null });
     pool.start();
     const stopAll = channel.stopAll;
     channel.stopAll = async (reason) => { await stopAll(reason); await pool.stop(); };

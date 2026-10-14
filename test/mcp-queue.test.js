@@ -16,7 +16,7 @@ import { startAgent } from '../src/index.js';
 
 const START = { adult: true };
 // the reply as these tests read it: without the nudges at the top (test/liveview.test.js checks them)
-const text = (r) => r.content.map((x) => x.text).join('\n').replace(/^(?:(?:Your user cannot see the game yet|Viewers see your why and plan under the video): [^\n]*\n\n)+/, '');
+const text = (r) => r.content.map((x) => x.text).join('\n').replace(/^(?:(?:Your user cannot see the game yet: |Viewers see your why and plan under the video: |Next: call live_view now)[^\n]*\n\n)+/, '');
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const status = (r) => r.structuredContent.steps.map((x) => x.status);
 
@@ -69,7 +69,8 @@ function stubBody({ unit = 100, stateMs = 0 } = {}) {
 }
 
 async function serve(t, { env = {}, body = {}, ...opts } = {}) {
-  const config = loadConfig({ WEB_HOST: '127.0.0.1', WEB_PORT: '0', LOG_DIR: '', ...env });
+  // say is the cheap step these tests queue: in-game chat on for every caller here (off on a public server)
+  const config = loadConfig({ WEB_HOST: '127.0.0.1', WEB_PORT: '0', LOG_DIR: '', PUBLIC_CHAT: 'on', ...env });
   const events = [];
   const bodies = [];
   const log = { event: (type, d) => events.push({ type, ...d }), tail: () => [] };

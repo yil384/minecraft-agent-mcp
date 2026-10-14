@@ -56,6 +56,7 @@ export const CARE_DEFAULTS = Object.freeze({ night: 'shelter', armor: 'craft', f
 export const CARE_KNOBS = Object.freeze({
   night: Object.freeze(['shelter', 'off']), armor: Object.freeze(['craft', 'wear', 'off']), food: Object.freeze(['hunt', 'eat', 'off']), tools: Object.freeze(['spare', 'off']),
   defend: Object.freeze(['on', 'off']), eat: Object.freeze(['hungry', 'starving', 'off']), escape: Object.freeze(['on', 'off']),
+  flee: Object.freeze(['on', 'off']),
 });
 
 /**
@@ -86,9 +87,10 @@ export const EXTRA_DEFS = Object.freeze([
     'Walk into unexplored land in a compass heading (0 north, 90 east, 180 south, 270 west) for 1 to 8 chunks; with biome, stop as soon as you stand in it.',
     obj({ heading: int('compass heading in degrees, 0 to 359', 0, 359), chunks: int('how far, in chunks of 16 blocks (default 1)', 1, 8), biome: NAME('a biome to look for, e.g. plains, desert, badlands') }, ['heading'])],
   ['policy',
-    'What the body does on its own for the rest of the game. You make the plans; the body acts by itself only through its reflexes, and each can be switched here: defend (on: fights back or flees when a hostile mob comes for it; off: never strikes, still flees), eat (starving: eats only at food 4 or less, the default; hungry: at food 14 or less; off: never on its own), escape (on: surfaces for air, leaves fire and lava, gets its footing back; off: leaves that to you). In fights: retreat_health, raw_food and fight (respond_to_threats or defend_only). Everything else (shelter at night, a shield, armor, food, spare tools, going back for its items after a death) is yours: each reply\'s "Body advice" says what needs doing and which skill would do it. No arguments: the defaults.',
+    'Your rules: what the body does by itself, without a call, for the rest of the game. Every game starts with none; set the ones you want (or start_game rules). defend on: fights back, raises its shield, walls itself in when badly hurt. flee on: withdraws from a hostile mob. escape on: out of water for air, out of fire and lava, back on its feet after a hit. eat_below N: eats the best food it carries at food N or less (0: never). A rule acts in a second, where your calls take seconds to minutes: without defend and escape the body dies more. Actions under a rule count as decided by you (each with when you set it). In fights: retreat_health, raw_food and fight (respond_to_threats or defend_only). Everything else (shelter, a shield, armor, food, tools, items after a death) is a call of yours; each reply\'s "Body advice" says what needs doing.',
     obj({
-      defend: pick('reflex: fight back or flee when attacked', CARE_KNOBS.defend), eat: pick('reflex: when it eats on its own', CARE_KNOBS.eat), escape: pick('reflex: air, fire, lava, footing', CARE_KNOBS.escape),
+      defend: pick('rule: fight back, shield, wall in when badly hurt', CARE_KNOBS.defend), flee: pick('rule: withdraw from a hostile mob', CARE_KNOBS.flee), escape: pick('rule: air, fire, lava, footing', CARE_KNOBS.escape),
+      eat_below: int('rule: eat at food N or less, 0 to 20 (0: never)', 0, 20), eat: pick('older form of eat_below: hungry (14), starving (4), off', CARE_KNOBS.eat),
       retreat_health: int('health 1 to 19 (default 10)', 1, 19), raw_food: pick('raw meat on its own', RAW_FOOD), fight: pick('fight or only defend', ['respond_to_threats', 'defend_only']),
       night: pick('full mode only: night', CARE_KNOBS.night), armor: pick('full mode only: armor', CARE_KNOBS.armor), food: pick('full mode only: food', CARE_KNOBS.food), tools: pick('full mode only: tools', CARE_KNOBS.tools),
     }, [])],
@@ -99,7 +101,7 @@ export const EXTRA_DEFS = Object.freeze([
     'Make a shield and put it in your off-hand: from 1 iron ingot you carry, else raw iron smelted, else 1 iron ore mined (stone pickaxe) and smelted; planks from your wood. Your fight reflex raises it against arrows.',
     obj({}, [])],
   ['portal',
-    'A Nether portal. Build the frame first: build nether_portal from 12 obsidian, and 2 more on uneven ground (or place obsidian yourself, 4 wide and 5 tall, corners optional). light: light the frame with flint_and_steel you carry; enter: step into the lit portal and wait to arrive (in the Nether, enter again to come back). pos: a frame block or an inside cell; without pos, the frame your last build nether_portal made, or in the Nether the portal you came out of. dismantle: takes the obsidian of your last frame back, block by block (after a frame that failed). Never near the world spawn or another player. Take food along (the Nether has little); it enters with whatever it carries.',
+    'A Nether portal. Build the frame first: build nether_portal from 12 obsidian, or 10 with 2 other blocks you carry (cobblestone, dirt...) for its top corners, and 2 more on uneven ground (or place obsidian yourself, 4 wide and 5 tall, corners optional). light: light the frame with flint_and_steel you carry; enter: step into the lit portal and wait to arrive (in the Nether, enter again to come back). pos: a frame block or an inside cell; without pos, the frame your last build nether_portal made, or in the Nether the portal you came out of. dismantle: takes the obsidian of your last frame back, block by block (after a frame that failed). Never near the world spawn or another player. Take food along (the Nether has little); it enters with whatever it carries.',
     obj({ action: pick('light, enter, or dismantle (your own last frame\'s obsidian back)', ['light', 'enter', 'dismantle']), pos: POS, low_supplies: { type: 'boolean', description: 'kept for old clients; the body always enters' } }, ['action'])],
   ['armor',
     'Craft the best armor you can pay for (iron ingots, leather, gold or diamonds) and put it on, with any better piece or shield you carry.',
@@ -156,6 +158,12 @@ export function needsTable(item) {
 /** Food that may give Hunger but never takes health, eaten when nothing safe is carried and food is low. */
 export const EMERGENCY_FOOD = Object.freeze(['rotten_flesh', 'chicken']);
 export const EMERGENCY_AT = 6;
+/**
+ * Whether food that may give Hunger is eaten now: at food EMERGENCY_AT or less, or hurt (health 14 or less) below food
+ * 18, the level it heals at (real game gd7540a, 2026-10-14: health 6 for 14 minutes at food 15 to 5 with rotten
+ * flesh carried; eat refused it above food 6, so it never healed). Rotten flesh adds 4 food; its Hunger costs about 1.
+ */
+export const emergencyEats = (food, health) => Number.isFinite(food) && food < 20 && (food <= EMERGENCY_AT || ((health ?? 20) <= 14 && food < 18));
 const UNSAFE_FOOD = new Set(['rotten_flesh', 'spider_eye', 'poisonous_potato', 'pufferfish', 'chicken', 'suspicious_stew', 'chorus_fruit']);
 /** The safe food carried with the best food value + saturation (as our eat skill picks), or null. */
 export function bestFood(inventory) {
@@ -190,6 +198,18 @@ export function continuesLast(last, args, feet) {
 }
 
 /** Blueprint cells for build_structure: '#' the material, '.' dug clear; anchored as our build skill anchors them. */
+/** Blocks a portal frame's top corners may be instead of obsidian (any solid block will do). */
+export const FRAME_FILLERS = Object.freeze(['cobblestone', 'cobbled_deepslate', 'stone', 'dirt', 'andesite', 'diorite', 'granite', 'tuff', 'deepslate', 'netherrack', 'oak_planks', 'spruce_planks', 'birch_planks']);
+/** A portal frame's two top corners (the cells at the ends of its top row), from its cells. */
+export function portalCorners(cells) {
+  const frame = cells.filter((c) => c.block_name !== 'air');
+  const top = Math.max(...frame.map((c) => c.y));
+  const row = frame.filter((c) => c.y === top);
+  // the top row is 4 wide: its two ends are the cells farthest along the row
+  const along = row.every((c) => c.x === row[0].x) ? 'z' : 'x';
+  const sorted = [...row].sort((a, b) => a[along] - b[along]);
+  return sorted.length === 4 ? [sorted[0], sorted[3]] : [];
+}
 export function blueprintCells(blueprint, material, feet, headingDegrees) {
   const bp = BLUEPRINTS[blueprint];
   const f = facingOf((-Number(headingDegrees || 0) * Math.PI) / 180); // compass degrees -> mineflayer yaw
@@ -343,7 +363,20 @@ export function toTheirs(skill, args, ctx) {
       }
       const { cells, facing } = blueprintCells(args.blueprint, args.material, feet, ctx.heading);
       if (args.material === 'obsidian' || args.blueprint === 'nether_portal') { const guard = frameGuard(cells, ctx); if (guard) return guard; }
-      return { calls: [{ tool: 'build_structure', args: { blocks: cells, remove_wrong_blocks: true } }], note: `built facing ${facing}`, build: { blueprint: args.blueprint, material: args.material, cells, facing, feet } };
+      // a portal frame needs 10 obsidian: its top corners may be any block (real game g0a414c, 2026-10-13: 11
+      // obsidian carried, and 9 minutes spent on a 12th). With 10 or 11, the corners are a carried building block
+      const corners = args.blueprint === 'nether_portal' && args.material === 'obsidian' ? portalCorners(cells) : [];
+      const have = Number(ctx.inventory?.obsidian) || 0;
+      const filler = FRAME_FILLERS.filter((b) => (Number(ctx.inventory?.[b]) || 0) > 0);
+      let note = `built facing ${facing}`;
+      if (corners.length === 2 && have >= 10 && have < 12 && filler.length) {
+        const pool = filler.flatMap((b) => Array(Math.min(2, Number(ctx.inventory[b]) || 0)).fill(b)).slice(0, 2);
+        if (pool.length === 2 || have === 11) {
+          corners.slice(0, 12 - have).forEach((c, k) => { c.block_name = pool[k] ?? pool[0]; });
+          note += `; its top corners are ${[...new Set(corners.filter((c) => c.block_name !== 'obsidian').map((c) => c.block_name))].join(' and ')} (a frame needs 10 obsidian)`;
+        }
+      }
+      return { calls: [{ tool: 'build_structure', args: { blocks: cells, remove_wrong_blocks: true } }], note, build: { blueprint: args.blueprint, material: args.material, cells, facing, feet } };
     }
     case 'attack': {
       let target = args.target;
@@ -361,8 +394,8 @@ export function toTheirs(skill, args, ctx) {
         // nothing safe: food that may only cost hunger (never health) is eaten when food is low, with a warning (a
         // real game, 2026-10-12, g0793f1: rotten flesh refused at food 6 and 3.4 health, nothing else carried)
         const last = EMERGENCY_FOOD.find((f) => (inv[f] ?? 0) > 0);
-        if (last && (ctx.food ?? 20) <= EMERGENCY_AT) return { calls: [{ tool: 'eat_food', args: { food_name: last } }], note: `${last} was all you had: it may give Hunger for a while (food drains faster), but it adds food; cooked meat is better` };
-        if (last) return refuse(`no safe food in your inventory: ${last} may give Hunger, so eat takes it only at food ${EMERGENCY_AT} or less (now ${ctx.food}); kill a cow, pig or sheep and cook the meat`, 'NEED_ITEMS');
+        if (last && emergencyEats(ctx.food ?? 20, ctx.health)) return { calls: [{ tool: 'eat_food', args: { food_name: last } }], note: `${last} was all you had: it may give Hunger for a while (food drains faster), but it adds food${(ctx.health ?? 20) <= 14 ? ' toward 18, where health comes back' : ''}; cooked meat is better` };
+        if (last) return refuse(`no safe food in your inventory: ${last} may give Hunger, so eat takes it only at food ${EMERGENCY_AT} or less, or when hurt below food 18 (now food ${ctx.food}); kill a cow, pig or sheep and cook the meat`, 'NEED_ITEMS');
         return refuse('no safe food in your inventory; kill a cow, pig or sheep and cook the meat', 'NEED_ITEMS');
       }
       return { calls: [{ tool: 'eat_food', args: { food_name: food } }] };
@@ -437,7 +470,7 @@ export function toTheirs(skill, args, ctx) {
     case 'shield': return { local: 'care', kind: 'shield', calls: [] };
     case 'policy': {
       // the care's knobs stay in the gateway (src/mineai/care.js); the rest goes to the runtime's survival policy
-      const knobs = Object.fromEntries(Object.keys(CARE_KNOBS).filter((k) => args[k] !== undefined).map((k) => [k, args[k]]));
+      const knobs = Object.fromEntries([...Object.keys(CARE_KNOBS), 'eat_below'].filter((k) => args[k] !== undefined).map((k) => [k, args[k]]));
       const theirs = ['retreat_health', 'fight', 'raw_food'].some((k) => args[k] !== undefined);
       const care = Object.keys(knobs).length ? knobs : theirs ? null : 'reset';
       if (!theirs && care !== 'reset') return { calls: [], care };
@@ -726,6 +759,8 @@ export function plainer(tool, text, call = null) {
     t = t.replace(/No loaded quarry or requested inventory gain was observed (before the requested observation window ended|within the requested wait at the spawner)\./, `no ${mob} came near you: explore 1 to 3 chunks (explore {heading, chunks}) to find some, then hunt again`);
   }
   if (tool === 'navigate') {
+    // their walk's move checks timing out on a busy server (g0842ff): plain words, not their code
+    t = t.replace(/repeated_movement_failure:\s*Server confirmation deadline elapsed\.?/i, 'the walk stopped: the server did not confirm its moves in time (a busy moment); send it again');
     const at = /of (-?\d+), (-?\d+), (-?\d+)\./.exec(t);
     const ground = /The ground in that column is at y=(-?\d+)/.exec(t);
     if (/No usable footing was observed/.test(t) && at && ground) {

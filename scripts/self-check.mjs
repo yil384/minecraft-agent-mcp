@@ -155,7 +155,7 @@ async function checks(base, key, playGame, minutes, print, pause) {
     let wood = null;
     for (let spot = 1; !wood; spot++) {
       for (;;) {
-        r = await call('start_game', { adult: true });
+        r = await call('start_game', { adult: true, live: false }); // a check, not a watched game
         if (!r.error) break;
         const again = r.data?.code === 'SERVER_STARTING' ? Math.min(Math.max(Number(r.data.retryAfterS) || 15, 1), 60) : /could not start/.test(r.text) ? 5 : 0;
         if (!again || left() < 120_000) fail(`start_game: ${short(r.text.split('\n')[0])}`);

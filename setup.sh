@@ -186,7 +186,7 @@ chmod 600 "$ENV_FILE"
 set_env RUN_UID "$(id -u)"
 set_env RUN_GID "$(id -g)"
 umask 077
-mkdir -p data/world data/logs data/mineai data/camera-auth data/minecraft-client secrets
+mkdir -p data/world data/logs data/mineai data/camera-auth data/minecraft-client data/recordings secrets
 chmod 700 data/mineai data/camera-auth secrets
 umask 022
 

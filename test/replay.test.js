@@ -29,7 +29,7 @@ import { createWeb } from '../src/web.js';
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const { games } = JSON.parse(fs.readFileSync(path.join(HERE, 'fixtures', 'replay-games.json'), 'utf8'));
 const config = loadConfig({ LOG_DIR: fs.mkdtempSync(path.join(os.tmpdir(), 'replay-')) });
-const JARGON = /#\d{2,}|\d\.\d{5,}|capability_limit|build: true|engagement minimum|NO_LOADED_MATCHING_TARGETS|consumption of/;
+const JARGON = /repeated_movement_failure|#\d{2,}|\d\.\d{5,}|capability_limit|build: true|engagement minimum|NO_LOADED_MATCHING_TARGETS|consumption of/;
 
 /** What the fake runtime does before a step, to play the real game's incidents (by the step's index in the game). */
 const INCIDENTS = {
@@ -161,6 +161,88 @@ INCIDENTS.g4ac86b = {
   33: (w) => { w.overworldAt = { x: 49.5, y: 93, z: 161.5 }; },
 };
 
+INCIDENTS.g71c9f5 = {
+  // a zombie at the hole before the first call; it killed the bot in the agent's first collect
+  0: (w) => { w.position = { x: 398.5, y: 77, z: -269.5 }; w.die = 'collect_block'; w.dieCause = 'Tst_rv was slain by Zombie'; },
+  1: (w) => { w.inventory.set('oak_log', 0); w.position = { x: 93.5, y: 83, z: 89.5 }; }, // respawned near the world spawn
+  20: LAVA_NEAR,
+  22: (w) => { w.inventory.set('flint', 1); },
+  // the obsidian it took (from the leftover portal at 49 93 160, the real game says) before the agent stopped the collect
+  24: (w) => { w.inventory.set('obsidian', 14); },
+  28: (w) => { w.netherAt = { x: 12.5, y: 58, z: 17.5 }; },
+};
+
+INCIDENTS.g0a414c = {
+  0: (w) => { w.position = { x: -355.5, y: 78, z: -19.5 }; },
+  18: POOL_AWAY,
+  21: LAVA_NEAR,
+  // flowing lava only near the second try
+  22: (w) => { w.blocks = [{ name: 'lava', found: 3, listed: [{ x: Math.floor(w.position.x) + 2, y: Math.floor(w.position.y), z: Math.floor(w.position.z), level: 3 }, { x: Math.floor(w.position.x) + 30, y: Math.floor(w.position.y), z: Math.floor(w.position.z), level: 0 }] }]; },
+  24: LAVA_NEAR,
+  // the pit where the 12th obsidian would not come: routes that stop without breaking anything
+  26: (w) => { LAVA_NEAR(w); w.fail.collect_block = 'Collection stopped: 5 routes in a row stopped without breaking or gaining anything; the last: the walk there got stuck. Broke 0 matching blocks; inventory gained 0/3 requested items.'; },
+};
+
+// the frame of another player's lit portal at 396 92 -65 (its 4 corners included), the pool the agent went to next
+const LIT_FRAME_GD = (w) => {
+  const portal = [];
+  for (const x of [396, 397]) for (const y of [92, 93, 94]) portal.push({ x, y, z: -65 });
+  const frame = [[395, 91], [398, 91], [395, 95], [398, 95], [395, 92], [395, 93], [395, 94], [398, 92], [398, 93], [398, 94], [396, 91], [397, 91], [396, 95], [397, 95]].map(([x, y]) => ({ x, y, z: -65 }));
+  w.blocks = [{ name: 'obsidian', found: 14, listed: frame }, { name: 'nether_portal', found: 6, listed: portal }, { name: 'lava', found: 9, listed: [{ x: 449, y: 71, z: -34, level: 0 }] }];
+};
+/** A site in rock (the bot in a tunnel its walk dug), with obsidian 14 again; the first dig clears the cells beside it. */
+const ROCK_SITE_GD = (w) => {
+  const feet = { x: Math.floor(w.position.x), y: Math.floor(w.position.y), z: Math.floor(w.position.z) };
+  w.inventory.set('obsidian', 14);
+  w.grid = new Map();
+  w.boxAt = (x, y, z) => (x === feet.x && z === feet.z && (y === feet.y || y === feet.y + 1) ? 'air' : 'stone');
+  let first = true;
+  w.digAlso = (c) => { if (!first) return []; first = false; return [{ x: c.x + 1, y: c.y, z: c.z }, { x: c.x - 1, y: c.y, z: c.z }, { x: c.x, y: c.y, z: c.z + 1 }, { x: c.x, y: c.y, z: c.z - 1 }]; };
+};
+INCIDENTS.gd7540a = {
+  0: (w) => { w.position = { x: 368.5, y: 82, z: -63.5 }; },
+  // a zombie fight in the middle of the smelt, its temporary furnace left standing (tried again there now)
+  7: (w) => w.takeovers.push({ tool: 'smelt_item', made: false, furnaceLeft: true, error: 'Action interrupted: fight response for zombie took control.' }),
+  // underground there: 12 of the shelter's wall cells were rock already (the fake builds every cell)
+  8: (w) => { w.inventory.set('dirt', 13); },
+  // the planks and stone the real game's shield was made from (the fake shelter took them for its walls)
+  12: (w) => { w.inventory.set('birch_planks', 8); w.inventory.set('cobblestone', 12); },
+  21: LAVA_NEAR,
+  // at the pool, the lit frame 37 blocks off: the search spares it, corners too (runtime patches 0014, 0015)
+  23: (w) => { LIT_FRAME_GD(w); w.blocks.push({ name: 'lava', found: 9, listed: [{ x: Math.floor(w.position.x) + 4, y: Math.floor(w.position.y) - 1, z: Math.floor(w.position.z), level: 0 }] }); },
+  // by the lit frame: its obsidian (corners too) is never taken, and no pool is near
+  26: LIT_FRAME_GD,
+  28: LAVA_NEAR,
+  // lava next to the first site
+  29: (w) => { const f = { x: Math.floor(w.position.x), y: Math.floor(w.position.y) }; w.boxAt = (x, y) => (x === f.x + 2 && y === f.y - 1 ? 'lava' : 'air'); },
+  30: (w) => { w.boxAt = null; },
+  // the three sites in rock: each frame goes up now
+  31: ROCK_SITE_GD,
+  32: (w) => { w.grid = null; w.boxAt = null; },
+  33: ROCK_SITE_GD,
+  34: (w) => { w.grid = null; w.boxAt = null; },
+  35: ROCK_SITE_GD,
+};
+
+/** A frame's site in a birch: grass under, leaves at the ground row in front and above it (g0842ff's first frame). */
+const BIRCH_SITE = (w) => {
+  const feet = { x: Math.floor(w.position.x), y: Math.floor(w.position.y), z: Math.floor(w.position.z) };
+  w.grid = new Map();
+  w.boxAt = (x, y, z) => (y < feet.y - 1 ? 'dirt' : y === feet.y - 1 ? (x > feet.x ? 'birch_leaves' : 'grass_block') : y >= feet.y + 1 && x > feet.x ? 'birch_leaves' : 'air');
+};
+INCIDENTS.g0842ff = {
+  0: (w) => { w.position = { x: -228.5, y: 110, z: 199.5 }; },
+  // the shelter's dirt (the real game dug 8 for its walls within the step; the fake shelter does not)
+  6: (w) => { w.inventory.set('dirt', 13); },
+  24: (w) => { w.inventory.set('flint', 3); }, // the flint the gravel gave
+  27: LAVA_NEAR,
+  // facing east by the birch, as the first frame was built
+  29: (w) => { w.heading = 90; BIRCH_SITE(w); },
+  30: (w) => { w.grid = null; w.boxAt = null; },
+  // the real game's 14 obsidian at the second spot (its first frame had placed none)
+  32: (w) => { w.inventory.set('obsidian', 14); },
+};
+
 /** The code a step that failed in a real game gets here (by index); every other step is ok. */
 const EXPECTED = {
   // 1: raw_chicken (refused before a hunt until 2026-10-12) is read as chicken now and hunted (src/tolerant.js); 18: the real game smelted the mutton again after its hitch, but here the
@@ -182,19 +264,42 @@ const EXPECTED = {
   // 23: refused when that frame is unknown, released when g0793f1's replay (earlier in this file) left it there, as it did
   g809e1b: { 16: null, 17: null, 18: null, 23: null, 25: 'LAVA', 32: null, 36: null, 38: null, 40: null, 42: null, 44: null, 45: null },
   // the lit portal and the pool far off (20, 22), the explore that found no plains (29)
-  g4ac86b: { 20: 'FAILED', 22: 'LAVA', 29: null },
+  // 20: the lit portal at 49 93 161 no longer stops the collect: its frame is spared (runtime patch 0014)
+  g4ac86b: { 22: 'LAVA', 29: null },
+  // 0: the zombie; 5: craft with no n, refused in a real game, runs now; the walks the world stopped (15, 24, 29);
+  // The agent's stop (21)
+  g71c9f5: { 0: 'DIED', 15: null, 21: null, 24: null, 29: null },
+  // 19: no pool near; 22: only flowing lava near; 26 to 29: the pit (routes that break nothing), 27 a walk stuck
+  g0a414c: { 19: 'LAVA', 22: 'LAVA', 26: 'FAILED', 27: null, 28: 'FAILED', 29: 'FAILED' },
   ga13a88: { 27: null, 28: null, 31: null, 40: null, 41: null, 42: null, 46: null, 47: null, 52: null, 53: null, 58: null },
+  // 9: the hunt from inside its shelter; 10: the smelt of step 7 went through there, so nothing is left to smelt here;
+  // 13 to 16: the reflexes that hid from zombies; 19: the walk into the air over the pool; 21: the obsidian that did
+  // not come there (here the pool beside gives it); 23: the agent's stop; 24: the height told right; 26: the lit frame,
+  // nothing else near; 29: lava beside the site; 31, 33, 35: the frames in rock that placed nothing go up now
+  // 16, 17: the walks into the cavern's air; 20: no way to the water underground; 21, 30: a height told right; 22: the
+  // server's move checks timed out; 24: the gravel, 20 of 24 (flint among them); 29: the frame in the birch goes up now
+  g0842ff: { 16: null, 17: null, 20: null, 21: null, 22: null, 24: null, 30: null },
+  gd7540a: { 9: null, 10: null, 13: null, 14: null, 15: null, 16: null, 19: null, 21: null, 23: null, 24: null, 26: 'LAVA', 29: 'LAVA' },
 };
+/** An advice kind a step's reply must carry (by index): g0a414c's third obsidian call that did not move is stuck. */
+const EXPECTED_ADVICE = { g0a414c: { 29: 'stuck' } };
 /** What a step's reply must say (by index). */
 const EXPECTED_TEXT = {
+  g71c9f5: { 5: /^craft \{"item":"wooden_pickaxe","n":1\}: ok/ },
   g809e1b: { 31: /cleared \d+ cells of (stone and dirt|dirt and stone) for it first/, 34: /cleared \d+ cells of (stone and dirt|dirt and stone) for it first/ },
-  g4ac86b: { 20: /at 49 93 161\): collect obsidian could take its frame\. Go about 200 blocks from it first/, 28: /cleared \d+ cells of/, 33: /your own portal is at -?\d+ -?\d+ -?\d+, \d+ blocks away \(the Nether side led to an older portal/ },
+  g4ac86b: { 20: /a lit portal at 49 93 161 \(\d+ blocks away\) is loaded: its frame was left alone, the obsidian comes from lava or other obsidian/, 28: /cleared \d+ cells of/, 33: /your own portal is at -?\d+ -?\d+ -?\d+, \d+ blocks away \(the Nether side led to an older portal/ },
   // 55, 57: the stone hillside and the birch leaves are cleared first now, and the frames go up (g809e1b's fix)
   ga13a88: { 1: /^go_to \{"x":-20,"y":78,"z":236\}: ok/, 55: /cleared \d+ cells of stone for it first/, 57: /cleared \d+ cells of birch_leaves for it first/ },
+  g0842ff: { 29: /\(built facing east; cleared \d+ cells of [a-z_ ]*birch_leaves[a-z_ ]* for it first\)/ },
+  gd7540a: {
+    7: /tried again once it let go/,
+    26: /the obsidian at the lit portal at 396 92 -65 is its frame and is never taken; no lava pool within 16 blocks to make obsidian from\. The nearest lava pool loaded is at 449 71 -34/,
+    31: /cleared 18 cells of stone for it first\)/, 33: /cleared 18 cells of stone for it first\)/, 35: /cleared 18 cells of stone for it first\)/,
+  },
 };
 
 /** The goal each game played for. */
-const GOALS = { g809e1b: 'nether_and_back', g4ac86b: 'nether_and_back', gb1cfe3: 'iron_pickaxe', g64e8c5: 'nether_and_back', g0793f1: 'nether_and_back', ga13a88: 'nether_and_back' };
+const GOALS = { g0842ff: 'nether_and_back', gd7540a: 'nether_and_back', g0a414c: 'nether_and_back', g71c9f5: 'nether_and_back', g809e1b: 'nether_and_back', g4ac86b: 'nether_and_back', gb1cfe3: 'iron_pickaxe', g64e8c5: 'nether_and_back', g0793f1: 'nether_and_back', ga13a88: 'nether_and_back' };
 /** A why for a step, as the agent writes them (the fixtures predate why in the log). */
 const whyOf = (i, st) => `Step ${i}: ${[st.tool, ...Object.values(st.args ?? {}).filter((v) => typeof v !== 'object')].join(' ')} for the goal`;
 
@@ -240,15 +345,18 @@ async function replay(id, steps) {
   await c.connect(new StreamableHTTPClientTransport(new URL(`${url}/mcp`)));
   const out = [];
   try {
-    const start = await c.callTool({ name: 'start_game', arguments: { adult: true, goal: GOALS[id] } });
+    // the games ran with the reflexes on, before the agent's rules (2026-10-13): replayed with those rules set
+    const start = await c.callTool({ name: 'start_game', arguments: { adult: true, goal: GOALS[id], rules: { defend: true, flee: true, escape: true, eat_below: 4 } } });
     assert.ok(!start.isError, start.content[0].text);
     if (GOALS[id]) assert.match(start.content[0].text, /\nGoal: [^\n]+\. The plan, milestone by milestone/);
     const fake = hosts.started[0].fake;
     for (const [i, st] of steps.entries()) {
       INCIDENTS[id]?.[i]?.(fake.world);
       const r = await c.callTool({ name: 'play', arguments: { skill: st.tool, args: st.args, why: whyOf(i, st) } });
-      const text = r.content.map((x) => x.text).join('\n');
+      // the reply without the nudges at the top (test/liveview.test.js checks them)
+      const text = r.content.map((x) => x.text).join('\n').replace(/^(?:(?:Your user cannot see the game yet: |Viewers see your why and plan under the video: |Next: call live_view now)[^\n]*\n\n)+/, '');
       const step = r.structuredContent?.steps?.at(-1) ?? null;
+      if (process.env.REPLAY_LOG === id) console.log(`#${i} ${st.tool} ${JSON.stringify(st.args)} -> ${r.structuredContent?.code ?? 'ok'}: ${(step?.result ?? text.split('\n')[0]).slice(0, 300)}`);
       out.push({ i, st, text, code: r.structuredContent?.code ?? null, status: step?.status ?? (r.isError ? 'refused' : null), result: step?.result ?? text.split('\n')[0], advice: r.structuredContent?.advice ?? [] });
     }
     // the game's report, mid-game and at the end
@@ -273,6 +381,7 @@ for (const [id, steps] of Object.entries(games)) {
       if (want === 'ok') assert.equal(o.status, 'confirmed', `no false failure: ${where} ${process.env.REPLAY_SHOW ? o.text : ''}`);
       else if (want) assert.equal(o.code, want, `the right code: ${where}`);
       if (EXPECTED_TEXT[id]?.[o.i]) assert.match(o.text, EXPECTED_TEXT[id][o.i], where);
+      if (EXPECTED_ADVICE[id]?.[o.i]) assert.equal(o.advice[0]?.kind, EXPECTED_ADVICE[id][o.i], `${where}: ${JSON.stringify(o.advice)}`);
       if (o.code) assert.ok(RESULT_CODES.includes(o.code), `a known code: ${where}`);
       assert.doesNotMatch(o.text, JARGON, `no runtime jargon: ${where}`);
       assert.ok(o.advice.length <= 5, `at most 5 advice items: ${where}`);

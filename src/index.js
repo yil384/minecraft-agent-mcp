@@ -337,22 +337,25 @@ export async function startAgent(opts = {}) {
       }
     }, () => {});
   };
-  // live_view: the live view of a game. With a live channel (LIVE_VIEW=local or facebook) the camera is pointed at the
-  // game and the call waits, up to waitMs, until the channel shows it live; it stops waiting early when another game has
-  // taken the camera since. Returns {channel, fb, state, game, camera, videoUrl, embedUrl, liveSince, error, retryInS}.
+  // live_view: the live view of a game. With a live channel (LIVE_VIEW=local or facebook) the game is put in line for
+  // the camera (first come, first served; owner: the owner's game, first; local: a test's game, last) and the call
+  // waits, up to waitMs, until the channel shows it live; it answers at once when the game is in line behind another
+  // (state queued, with its place and the wait). Returns {channel, fb, state, game, camera, videoUrl, embedUrl,
+  // liveSince, error, retryInS, queue}.
   const pause = (ms) => new Promise((r) => { setTimeout(r, ms).unref?.(); });
-  const liveView = async (gameId, { waitMs = 0, signal = null } = {}) => {
+  const liveView = async (gameId, { waitMs = 0, signal = null, local = false, owner = false } = {}) => {
     if (typeof streams?.focus === 'function') {
       const t0 = Date.now();
-      let st = await Promise.resolve(streams.focus(gameId)).catch(() => null);
+      let st = await Promise.resolve(streams.focus(gameId, { ...(local ? { local: true } : {}), ...(owner ? { owner: true } : {}) })).catch(() => null);
       if (channelOf(st)) {
         let elsewhere = 0; // since when the camera has been live on another game
         while (Date.now() + 1_000 < t0 + waitMs && !signal?.aborted) {
           if (st.state === 'live' && st.game === gameId) break;
+          if (st.state === 'queued') break; // in line behind another game: said at once
           if (st.state === 'live' && st.game !== gameId) { elsewhere ||= Date.now(); if (Date.now() - elsewhere > 5_000) break; } else elsewhere = 0;
           if ((st.state === 'retrying' || st.state === 'capped') && (st.retryInS ?? 0) * 1_000 > t0 + waitMs - Date.now()) break;
           await pause(1_000);
-          st = (await Promise.resolve(streams.live?.()).catch(() => null)) ?? st;
+          st = (await Promise.resolve(streams.live?.(gameId)).catch(() => null)) ?? st;
         }
         return { ...st, channel: channelOf(st), camera: st.game ?? null, game: gameId };
       }
@@ -365,7 +368,7 @@ export async function startAgent(opts = {}) {
   const liveMode = !streams ? 'off' : config.stream.liveView !== 'off' ? config.stream.liveView : typeof streams.hlsFile === 'function' ? 'local' : 'facebook';
   // the local watch page: the channel's state, and where its HLS files come from (the camera service, on loopback)
   const watch = liveMode === 'local' ? {
-    live: async () => { try { const st = await streams.live?.(); return channelOf(st) ? st : null; } catch { return null; } },
+    live: async (id = null) => { try { const st = await streams.live?.(id); return channelOf(st) ? st : null; } catch { return null; } },
     hlsBase: streams.serviceUrl ?? null,
     hlsToken: config.stream.serviceToken || null,
     hlsFile: typeof streams.hlsFile === 'function' ? (name) => streams.hlsFile(name) : null,
@@ -434,7 +437,7 @@ export async function startAgent(opts = {}) {
           log.event('spread_error', { session: sessionId, message: String(err?.message ?? err).slice(0, 200) });
           return;
         }
-        const { scans, notable } = await settleAfterSpread(body, from);
+        const { scans, notable } = await settleAfterSpread(body, from); // landed, and the chunks there arrived
         const at = body.bot.entity?.position;
         log.event('spread', { session: sessionId, at: at ? `${Math.floor(at.x)} ${Math.floor(at.y)} ${Math.floor(at.z)}` : null, scans, notable });
       });
@@ -451,6 +454,10 @@ export async function startAgent(opts = {}) {
   const web = createWeb({
     config, log, liveView: streams ? liveView : null, liveMode, watch, mcpCallMs: opts.mcpCallMs, serverReady,
     cameraNote: () => cameraStatusNote(config.log.dir),
+    // the camera's state for a game, read only (the live page's question: on camera and live?)
+    liveState: typeof streams?.live === 'function' ? (id) => Promise.resolve(streams.live(id)).catch(() => null) : null,
+    // a server with a live view (LIVE_VIEW=local or facebook): play waits for live_view (src/mcp.js)
+    liveEnabled: Boolean(streams),
     // the HUD under the live video: the lines go to the camera's channel, which draws them for the game on camera
     term: typeof streams?.term === 'function' ? (id, u) => streams.term(id, u) : null,
     ...(mineai ? { skills: MINEAI_SKILLS, careMode: config.mineai.care ?? 'advise', startTimeoutMs: config.mineai.startMs + 30_000 } : {}),

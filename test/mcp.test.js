@@ -23,7 +23,7 @@ async function connect(url) {
   return c;
 }
 // the reply as these tests read it: without the nudges at the top (test/liveview.test.js checks them)
-const text = (r) => r.content.map((x) => x.text).join('\n').replace(/^(?:(?:Your user cannot see the game yet|Viewers see your why and plan under the video): [^\n]*\n\n)+/, '');
+const text = (r) => r.content.map((x) => x.text).join('\n').replace(/^(?:(?:Your user cannot see the game yet: |Viewers see your why and plan under the video: |Next: call live_view now)[^\n]*\n\n)+/, '');
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const START = { adult: true };
 
@@ -73,7 +73,7 @@ test('mcp: start_game, play, play_sequence, refusals, one bot per MCP session', 
     const page = await a.callTool({ name: 'live_view', arguments: {} });
     assert.equal(text(page), `Live view of game ${link.game}: off on this server (LIVE_VIEW=off). The game itself works.`, 'html is the default');
     assert.equal(page.structuredContent.format, 'html');
-    assert.equal(page.structuredContent.html.includes('<iframe'), false, 'no player without a live video');
+    assert.equal(page.structuredContent.html.includes('data-src='), false, 'no player without a live video');
     const embed = JSON.parse(text(await a.callTool({ name: 'live_view', arguments: { format: 'embed' } })));
     assert.deepEqual(embed, { format: 'embed', game: link.game, live: false, state: 'off', camera_game: null }, 'no live video without a camera');
     assert.doesNotMatch(s, /call live_view/, 'no nudge toward a live view the server does not have');
@@ -120,12 +120,12 @@ test('mcp: start_game, play, play_sequence, refusals, one bot per MCP session', 
     // one bad step refuses the whole call
     const notRun = await a.callTool({ name: 'play_sequence', arguments: { steps: [
       { skill: 'craft', args: { item: 'stick', n: 4 } },
-      { skill: 'craft', args: { item: 'stick' } },
+      { skill: 'craft', args: { item: 'stick', n: 'many' } }, // (a craft with no n makes one: g71c9f5)
       { skill: 'craft', args: { item: 'crafting_table', n: 1 } },
     ] } });
     assert.equal(notRun.isError, true);
     assert.equal(notRun.structuredContent.code, 'BAD_ARGS');
-    assert.match(text(notRun), /^2\. craft: not run, bad arguments: craft\.n is required\nNothing was run/m);
+    assert.match(text(notRun), /^2\. craft: not run, bad arguments: craft\.n must be an integer\nNothing was run/m);
     assert.deepEqual(notRun.structuredContent.state.inventory, { oak_log: 2, oak_planks: 4 });
 
     // a second MCP session from the same address gets its own bot (connector users share the agent's addresses)
@@ -339,7 +339,7 @@ test('mcp limits: games per address, sessions per address (oldest idle one evict
   assert.deepEqual(statuses, [200, 200, 200, 429]);
 });
 
-test('mcp games per address: WEB_MCP_GAMES_PER_ADDRESS, by default every bot (MAX_GAMES) and at least 2', async (t) => {
+test('mcp games per address: WEB_MCP_GAMES_PER_ADDRESS, by default every bot (MAX_GAMES) and at least 2; RATE_LIMITED', async (t) => {
   assert.equal(loadConfig({}).web.mcpGamesPerAddress, 2);
   assert.equal(loadConfig({ MAX_GAMES: '8' }).web.mcpGamesPerAddress, 8, 'one person: every bot');
   assert.equal(loadConfig({ MAX_GAMES: '1' }).web.mcpGamesPerAddress, 2, 'a second start queues, never refused');
@@ -348,7 +348,10 @@ test('mcp games per address: WEB_MCP_GAMES_PER_ADDRESS, by default every bot (MA
   const { client } = await serve(t, { env: { WEB_MAX_SESSIONS: '4', WEB_MCP_GAMES_PER_ADDRESS: '1' } });
   const [a, b] = [await client(), await client()];
   assert.match(text(await a.callTool({ name: 'start_game', arguments: START })), /^New game/);
-  assert.match(text(await b.callTool({ name: 'start_game', arguments: START })), /already plays 1 game, the most one address may hold/);
+  const second = await b.callTool({ name: 'start_game', arguments: START });
+  assert.match(text(second), /^RATE_LIMITED: your connector's address already plays 1 game, the most one address may hold/);
+  assert.equal(second.structuredContent.code, 'RATE_LIMITED');
+  assert.ok(second.structuredContent.retryAfterS > 0);
 });
 
 test('mcp queue: a full server answers with a place in the queue and an estimate; the first in line gets the next bot', async (t) => {
@@ -360,7 +363,10 @@ test('mcp queue: a full server answers with a place in the queue and an estimate
   assert.match(text(await b.callTool({ name: 'start_game', arguments: START })), /^New game/);
   const third = await c.callTool({ name: 'start_game', arguments: START });
   assert.equal(third.isError, true);
-  assert.match(text(third), /^could not start: all 2 bots are in use; you are number 1 in the queue \(1 waiting\), and your turn comes in about 8 min at the latest, when enough leases end \(games often end sooner\); call start_game again within 90 s to keep your place/);
+  assert.match(text(third), /^SERVER_FULL: all 2 bots are in use; you are number 1 in the queue \(1 waiting\), and your turn comes in about 8 min at the latest, when enough leases end \(games often end sooner\); call start_game again within 90 s to keep your place/);
+  assert.equal(third.structuredContent.code, 'SERVER_FULL');
+  assert.deepEqual(third.structuredContent.queue, { position: 1, waiting: 1, etaSeconds: 480, holdSeconds: 90 });
+  assert.ok(third.structuredContent.retryAfterS >= 1);
   assert.match(text(await d.callTool({ name: 'start_game', arguments: START })), /you are number 2 in the queue \(2 waiting\), and your turn comes in about 10 min/);
 
   // a bot frees up: it is c's, not d's, even though d asks first
@@ -388,8 +394,9 @@ test('mcp live_view (LIVE_VIEW=facebook): the embed data while the camera films 
   const none = await c.callTool({ name: 'live_view', arguments: { format: 'embed' } });
   assert.equal(none.isError, true);
   assert.match(text(none), /call start_game first/);
-  const s = text(await c.callTool({ name: 'start_game', arguments: START }));
-  assert.match(s, /Next: call live_view now and show the HTML it returns/);
+  const s0 = await c.callTool({ name: 'start_game', arguments: START });
+  const s = text(s0);
+  assert.match(s0.content[0].text, /^Next: call live_view now and show the HTML it returns/, 'the first line');
   const id = /game (g\w+)/.exec(s)[1];
   assert.equal(JSON.parse(text(await c.callTool({ name: 'live_view', arguments: { format: 'embed' } }))).live, false);
   live.add(id);
@@ -398,7 +405,7 @@ test('mcp live_view (LIVE_VIEW=facebook): the embed data while the camera films 
   });
   const page = await c.callTool({ name: 'live_view', arguments: { format: 'html' } });
   assert.match(text(page), /live on Facebook\.\nVideo \(plain link\): https:\/\/www\.facebook\.com\/examplepage\/videos\/123\/\n/);
-  assert.ok(page.structuredContent.html.includes('<iframe src="https://www.facebook.com/plugins/video.php?href=x&amp;show_text=false&amp;autoplay=true&amp;mute=true"'));
+  assert.ok(page.structuredContent.html.includes('data-src="https://www.facebook.com/plugins/video.php?href=x&amp;show_text=false&amp;autoplay=true&amp;mute=true"'));
   const bad = await c.callTool({ name: 'live_view', arguments: { format: 'gif' } });
   assert.equal(bad.isError, true, 'html, link or embed');
 });

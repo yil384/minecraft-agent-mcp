@@ -3,7 +3,7 @@
 // both bodies (ours, and BODY=mineai's extra skills and descriptions) and every MCP tool as tools/list sends it. The agent
 // run in testing (2026-10-08) found smelt saying "at most 24 a call" while its schema took n from 1 to 64. And the
 // skills a server offers are named, from one source, in the server instructions and in both play tools, so a client
-// never has to guess one (The agent's own notes listed only some, and it had to trust start_game's reply to use hunt).
+// never has to guess one (the agent's own notes listed only some, and it had to trust start_game's reply to use hunt).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';

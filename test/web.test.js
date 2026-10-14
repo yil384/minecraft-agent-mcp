@@ -81,7 +81,7 @@ async function serve(t, { env = {}, bodyOpts, ...opts } = {}) {
   const config = loadConfig({
     // with an access key: a server without one answers nothing that came through a proxy (these tests play the proxy)
     WEB_HOST: '127.0.0.1', WEB_PORT: '0', WEB_MAX_SESSIONS: '2', WEB_LEASE_MS: '600000', MCP_ACCESS_KEY: 'k3y-0123456789abcdef',
-    WEB_MAX_BODY: '2048', WEB_ADMIN_TOKEN: ADMIN, WEB_GUEST_PAGES: 'true', ...env,
+    WEB_MAX_BODY: '2048', WEB_ADMIN_TOKEN: ADMIN, WEB_GUEST_PAGES: 'true', PUBLIC_CHAT: 'on', ...env,
   });
   const log = createLogger({ dir: null, config });
   const bodies = new Map();
@@ -226,6 +226,19 @@ test('play actions: valid form args reach the body as typed values, bad ones nev
   assert.equal((await fetch(`${url}/play/${'A'.repeat(32)}`)).status, 404);
   assert.equal((await fetch(`${url}/play/..%2F..%2Fetc`)).status, 404);
   assert.equal((await post(`${page}/collect`, { block: 'oak_log', n: '1' }, { 'content-type': 'text/plain' })).status, 415);
+});
+
+test('say with PUBLIC_CHAT off (a public server; on by default): a guest\'s chat is not run', async (t) => {
+  assert.equal(loadConfig({}).web.publicChat, true, 'on by default: a server of your own');
+  const { url, bodies } = await serve(t, { env: { PUBLIC_CHAT: 'off' } });
+  const { page } = await guest(url);
+  const body = [...bodies.values()][0];
+  await post(`${page}/say`, { text: 'hello' });
+  assert.ok(!body.calls.some((c) => c.tool === 'say'), 'nothing said');
+  assert.match(await text(page), /say \(in-game chat\) is off on this server \(PUBLIC_CHAT=off\)/);
+  const r = await fetch(`${url}/api/${page.split('/').pop()}/say`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ text: 'hi' }) });
+  assert.equal(r.status, 403);
+  assert.equal((await r.json()).code, 'NOT_ALLOWED');
 });
 
 test('escaping: state, results, chat and notices are shown as text, never as markup', async (t) => {

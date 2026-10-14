@@ -175,7 +175,9 @@ test('nether: collect obsidian runs only near lava, in the Overworld, with no ot
     b.fake.world.blocks = [lava(-148, 60, 150), { name: 'nether_portal', found: 6, listed: [{ x: -150, y: 64, z: 151 }] }];
     await b.body.rescan();
     r = await b.body.run('collect', { block: 'obsidian', n: 4 });
-    assert.match(r.result, /^a lit portal is loaded \d+ blocks away \(at -150 64 151\): collect obsidian could take its frame\. Go about 200 blocks from it first, for example go_to -?\d+ -?\d+ -?\d+ \(in legs of up to 256 blocks/);
+    // a lit portal's frame is never taken (runtime patch 0014): the collect runs and says so
+    assert.equal(r.ok, true, r.result);
+    assert.match(r.result, /\(a lit portal at -150 64 151 \(\d+ blocks away\) is loaded: its frame was left alone, the obsidian comes from lava or other obsidian\)$/);
     // in the Nether: never
     a.fake.world.dimension = 'the_nether';
     await a.body.refresh();
@@ -266,10 +268,10 @@ test('a reflex takes a craft over: made means ok (with a note), cut short means 
     r = await body.run('collect', { block: 'oak_log', n: 6 });
     assert.equal(r.code, 'INTERRUPTED');
     assert.match(r.result, /a reflex took the body over \(it got out of the way of a zombie\) before collect block was done/);
-    // the takeovers themselves are the body's own actions: counted, and told in onItsOwn (a clean-room run: the reply
-    // said "a reflex took the body over" while the attribution said 0 reflexes, 100% the agent)
+    // the takeovers themselves are the body's own actions (no rule of the agent's set them off): counted, and told in
+    // onItsOwn (a clean-room run: the reply said "a reflex took the body over" while the attribution said 0 reflexes)
     const taken = body.onItsOwn(0).filter((e) => e.kind === 'takeover');
-    assert.ok(taken.some((e) => e.source === 'reflex' && /got out of the way of a zombie \(during the collect\)/.test(e.text)), JSON.stringify(taken));
+    assert.ok(taken.some((e) => e.source === 'body' && /got out of the way of a zombie \(during the collect\)/.test(e.text)), JSON.stringify(taken));
     assert.ok(taken.some((e) => /it fought a skeleton/.test(e.text)), JSON.stringify(taken));
     assert.ok(body.attribution().reflex >= 4, JSON.stringify(body.attribution()));
     // a review of real games: reflexes during a step count as the body's, a step refused before it ran is not the agent's action
@@ -319,14 +321,17 @@ test('a step of the player\'s never runs beside an action of the body\'s own tha
   const fake = hosts.started[0].fake;
   await body.ready;
   try {
-    // before the first call, at night: the body shelters on its own; its dig does not stop when asked
-    fake.world.durations = { ...(fake.world.durations ?? {}), navigate: 2_500 };
+    // a meal under the agent's rule eat_below (the only action of the body's own since 2026-10-13), one that does not stop
+    // when asked
+    fake.world.durations = { ...(fake.world.durations ?? {}), eat_food: 2_500 };
     fake.world.ignoreCancel = true;
-    fake.world.timeOfDay = 15000;
-    assert.ok(await until(() => fake.tools('navigate').length > 0, 6000), 'the body started its own shelter');
+    fake.world.food = 5;
+    fake.world.inventory.set('bread', 2);
+    body.setRules({ eat_below: 6 });
+    assert.ok(await until(() => fake.tools('eat_food').length > 0, 6000), 'the body started its meal');
     const r = await body.run('craft', { item: 'stick', n: 4 });
     assert.equal(r.ok, false);
-    assert.match(r.result, /^busy: the body is still finishing what it did on its own \(sheltering for the night\); send the step again in a few seconds$/);
+    assert.match(r.result, /^busy: the body is still finishing what it did on its own \(eating\); send the step again in a few seconds$/);
     assert.equal(fake.tools('craft_item').length, 0, 'nothing ran beside it');
     fake.world.ignoreCancel = false;
     await sleep(2_600);

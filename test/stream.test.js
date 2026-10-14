@@ -89,7 +89,7 @@ test('stream keys: masked in what is logged, scrubbed from ffmpeg messages and f
   assert.equal(JSON.stringify(log.tail()).includes(KEY), false);
 });
 
-test('captions: fixed words from the skill and its validated names and numbers, with who acts (The agent or a reflex); chat text never shows', async () => {
+test('captions: fixed words from the skill and its validated names and numbers, with who acts (the agent or a reflex); chat text never shows', async () => {
   assert.equal(captionFor({ phase: 'start', tool: 'collect', args: { block: 'oak_log', n: 3 } }), 'Collecting oak log (3)');
   assert.equal(captionFor({ phase: 'start', tool: 'go_to', args: { x: -133, y: 70, z: 45 } }), 'Walking to -133 70 45');
   assert.equal(captionFor({ phase: 'start', tool: 'craft', args: { item: 'crafting_table', n: 1 } }), 'Crafting crafting table');

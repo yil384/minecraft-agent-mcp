@@ -33,7 +33,8 @@ import { startFakeMineAi, fakeHosts } from './fake-mineai.js';
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(HERE, '..');
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-const text = (r) => r.content.map((x) => x.text).join('\n');
+// the reply as these tests read it: without the nudges at the top (test/liveview.test.js checks them)
+const text = (r) => r.content.map((x) => x.text).join('\n').replace(/^(?:(?:Your user cannot see the game yet: |Viewers see your why and plan under the video: |Next: call live_view now)[^\n]*\n\n)+/, '');
 // temporary folders of this file, removed when it is done
 const made = [];
 const tmp = (p) => { const dir = fs.mkdtempSync(path.join(os.tmpdir(), p)); made.push(dir); return dir; };
@@ -495,7 +496,7 @@ test('mineai host: missed heartbeats and a lost connection count as a crash; clo
 test('mineai through MCP: the queue, request_id, typed codes and the extra skills on top of the body', async () => {
   const hosts = fakeHosts(() => ({ durations: { collect_block: 50 } }));
   const web = createWeb({
-    config: loadConfig({ WEB_HOST: '127.0.0.1', WEB_PORT: '0' }), log, skills: MINEAI_SKILLS,
+    config: loadConfig({ WEB_HOST: '127.0.0.1', WEB_PORT: '0', PUBLIC_CHAT: 'on', WEB_MCP_REQUESTS_PER_MINUTE: '100000' }), log, skills: MINEAI_SKILLS,
     makeBody: (id, o) => createMineAiBody({ config, log, hosts, gameId: id, username: `Tst_rv_${id}`, viewId: o?.viewId }),
   });
   const { url } = await web.start();
@@ -506,7 +507,8 @@ test('mineai through MCP: the queue, request_id, typed codes and the extra skill
     // 39,994 bytes before the survival skills; the armor skill, the policy's care knobs and onItsOwn in the reply schema add about 2 KB;
     // advise mode (the reflex knobs, the shelter and shield skills, advice and attribution in the schema) about 4 KB;
     // the one-line prompt (game_report, start_game's goal, the position shape) about 0.8 KB
-    assert.ok(size < 52_000, `our tools/list stays small (${size} bytes; theirs is 1.36 MB)`);
+    // set_goal, why and plan, the live view rule (2026-10-13) about 1 KB more
+    assert.ok(size < 54_000, `our tools/list stays small (${size} bytes; theirs is 1.36 MB)`);
     assert.doesNotMatch(JSON.stringify(listed), /rationale|submission_id|wait_for_action|response_format/);
     const play = listed.tools.find((t) => t.name === 'play');
     assert.match(play.description, /- hunt \{mob: one of cow\|pig[^}]*, drop: text \(1 to 48 characters\), n: integer 1 to 64, without_shield: true\|false \(optional\)\}/);
@@ -1035,7 +1037,7 @@ test('mineai: what a step itself used and made, from their evidence (ownChange)'
 test('mineai body and MCP: a step\'s own use and gain apart from what changed on the way (the agent run\'s deltas)', async () => {
   const hosts = fakeHosts(() => ({ inventory: { cobblestone: 3, stick: 2, crafting_table: 1, stone_pickaxe: 1, raw_iron: 3, coal: 2, furnace: 1 } }));
   const web = createWeb({
-    config: loadConfig({ WEB_HOST: '127.0.0.1', WEB_PORT: '0' }), log, skills: MINEAI_SKILLS,
+    config: loadConfig({ WEB_HOST: '127.0.0.1', WEB_PORT: '0', PUBLIC_CHAT: 'on', WEB_MCP_REQUESTS_PER_MINUTE: '100000' }), log, skills: MINEAI_SKILLS,
     makeBody: (id, o) => createMineAiBody({ config, log, hosts, gameId: id, username: `Tst_rv_${id}`, viewId: o?.viewId }),
   });
   const { url } = await web.start();
@@ -1118,7 +1120,7 @@ test('mineai body and MCP: a step\'s own use and gain apart from what changed on
 // parenthesis never closed, which read as a cell of sea water. Its words, as testing logged them:
 const F3 = 'failed: 3 cells still wrong: 3 were refused (-176,64,58: search timed out after 2000 ms compute (limit 2000 ms); no path or usable partial route found; visited 32508 nodes, generated 50479; closest node was -179,62,58; -177,64,58: search timed out after 2000 ms compute (limit 2000 ms); no path or usable partial route found; visited 33194 nodes, generated 51483; closest node was -179,62,58; -178,64,58: search timed out after 2000 ms compute (limit 2000 ms); no path or usable partial route found; visited 33194 nodes, generated 51483; closest node was -179,62,58)';
 
-test('mineai build: the same build near an incomplete structure continues it; a complete, far or other one starts anew (The agent re-test, g42b738)', () => {
+test('mineai build: the same build near an incomplete structure continues it; a complete, far or other one starts anew (the agent re-test, g42b738)', () => {
   const feet = { x: 10, y: 64, z: -4 };
   const first = toTheirs('build', { blueprint: 'hut_3x3', material: 'cobblestone' }, { position: { x: 10.5, y: 64, z: -3.5 }, heading: 90 });
   assert.equal(first.note, 'built facing east');
@@ -1145,7 +1147,7 @@ test('mineai build: the same build near an incomplete structure continues it; a 
   assert.equal(continuesLast(null, { blueprint: 'shelter', material: 'cobblestone' }, feet), false);
 });
 
-test('mineai build: a failed build says which cells it could not do and why in plain words, never cut mid-word or with a bracket open (The agent re-test, F3)', () => {
+test('mineai build: a failed build says which cells it could not do and why in plain words, never cut mid-word or with a bracket open (the agent re-test, F3)', () => {
   const call = { tool: 'build_structure', args: { blocks: [{ x: 0, y: 64, z: 0, block_name: 'cobblestone' }, { x: 1, y: 64, z: 0, block_name: 'air' }] } };
   const structure = {
     dimension: 'overworld', cells: 27, correct: 24, placed: 17, dug: 9, wrong: 3, passes: 5, complete: false, missing: [],
@@ -1180,7 +1182,7 @@ test('mineai build: a failed build says which cells it could not do and why in p
   assert.doesNotMatch(old.result, /\bsea\b/, 'a reply without an audit is cut cleanly too');
 });
 
-test('mineai body: build again where an incomplete build stands continues it, and says so (The agent re-test, g42b738)', async () => {
+test('mineai body: build again where an incomplete build stands continues it, and says so (the agent re-test, g42b738)', async () => {
   const { body, fake } = await bodyOn({ inventory: { cobblestone: 64 } });
   try {
     fake.world.buildLeft = 2;

@@ -23,6 +23,12 @@ assets/ui/music/etirwer.m4a
   "Etirwer" by Kistol (https://opengameart.org/content/etirwer), CC0 1.0. Re-encoded and loudness-levelled. Credit is
   not required and is given with thanks.
 
+src/moderation/ldnoobw-en.txt
+  The English list of the "List of Dirty, Naughty, Obscene, and Otherwise Bad Words" project
+  (https://github.com/LDNOOBW/List-of-Dirty-Naughty-Obscene-and-Otherwise-Bad-Words, commit 5faf2ba, file "en"),
+  copied unchanged. Creative Commons Attribution 4.0 International (src/moderation/LICENSE-ldnoobw.txt,
+  src/moderation/NOTICE.md).
+
 assets/brand/picasso-lab-pixel-230.png
   The Picasso Lab logo. Copyright 2026 Picasso Lab, UC San Diego. All rights reserved: the logo is NOT licensed under
   the Apache License 2.0 or any other licence in this repository. It is included only so that this project's own

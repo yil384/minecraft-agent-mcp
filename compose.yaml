@@ -76,15 +76,20 @@ services:
       STREAM_ROLE: camera
       # the agent's secrets are not the camera's business (the camera only shares STREAM_SERVICE_TOKEN with it)
       MCP_ACCESS_KEY: ""
+      MCP_OWNER_KEY: ""
       WATCH_KEY: ""
       WEB_ADMIN_TOKEN: ""
       WEB_PROXY_SECRET: ""
+      WEB_IP_SALT: ""
       CAMERA_AUTH_DIR: /auth
       FB_TOKEN_FILE: /secrets/fb-token
       FB_STATE_FILE: /logs/fb-live-state.json
       LOG_DIR: /logs
+      # RECORD=true: each filmed game's clean video, stream and HUD timeline (docs/CONFIG.md, "Recordings")
+      RECORD_DIR: /recordings
     volumes:
       - ./data/logs:/logs
+      - ./data/recordings:/recordings
       - console:/console
       - ./data/camera-auth:/auth
       # the Minecraft client, downloaded from Mojang at the camera's first start (after the EULA)

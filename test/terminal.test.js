@@ -64,7 +64,7 @@ test('feed: a call, then its results once; advice when it changes; reflexes and 
   const game = { id: 'g1', body: { attribution: () => ({ agent: 3, reflex: 1, agentPct: 75 }), snapshot: () => ({ dimension }) } };
   const reply = (st) => ({ content: [{ type: 'text', text: 'x' }], structuredContent: st });
   feed.reply(game, 'start_game', { adult: true }, reply({ steps: [], state: { health: 20, food: 20, time: 0 } }));
-  assert.deepEqual(sent.at(-1), { id: 'g1', lines: [{ k: 'call', t: '> start_game', say: 'Start a new game', tool: 'start_game', raw: '{"adult":true}', rid: 1 }, { k: 'reply', t: '< x', rid: 1 }], status: 'HP 20/20  FOOD 20/20  DAY 06:00  |  Agent 3 | Reflex 1 | 75% agent', st: { hp: 20, food: 20, clock: 'DAY 06:00', ticks: 0, agent: 3, reflex: 1, pct: 75 }, live: { mode: 'idle', reason: 'waiting' }, sub: null, game: { id: 'g1', s: 0 } });
+  assert.deepEqual(sent.at(-1), { id: 'g1', lines: [{ k: 'call', t: '> start_game', say: 'Start a new game', tool: 'start_game', raw: '{"adult":true}', rid: 1, src: 'agent' }, { k: 'reply', t: '< x', rid: 1 }], status: 'HP 20/20  FOOD 20/20  DAY 06:00  |  Agent 3 | Reflex 1 | 75% agent', st: { hp: 20, food: 20, clock: 'DAY 06:00', ticks: 0, agent: 3, reflex: 1, pct: 75 }, live: { mode: 'idle', reason: 'waiting' }, sub: null, game: { id: 'g1', s: 0 } });
   feed.call(game, 'play_sequence', { steps: [{ skill: 'collect', args: { block: 'oak_log', n: 3 } }, { skill: 'craft', args: { item: 'wooden_pickaxe' } }] });
   assert.equal(sent.at(-1).lines[0].t, '> play_sequence: collect oak_log 3, craft wooden_pickaxe');
   assert.match(sent.at(-1).status, /^HP 20\/20/, 'the last state, though the call carries none');
@@ -73,7 +73,7 @@ test('feed: a call, then its results once; advice when it changes; reflexes and 
   const advice = [{ kind: 'night', text: 'night in 45 s, no shelter, no shield' }];
   clock += 41_000;
   feed.reply(game, 'play_sequence', {}, reply({ steps: [s1, s2], advice, state: { health: 18, food: 19, time: 12_250 } }));
-  assert.deepEqual(sent.at(-1).lines, [{ k: 'ok', t: 'ok  mined 3 oak log (9 s)', say: 'Mine 3 oak logs', ms: 9_000, n: 1, of: 2, c: 1 }, { k: 'advice', t: 'advice: night in 45 s, no shelter, no shield', ak: 'night' }, { k: 'reply', t: '< x', rid: 2 }]);
+  assert.deepEqual(sent.at(-1).lines, [{ k: 'ok', t: 'ok  mined 3 oak log (9 s)', say: 'Mine 3 oak logs', ms: 9_000, n: 1, of: 2, c: 1, src: 'agent' }, { k: 'advice', t: 'advice: night in 45 s, no shelter, no shield', ak: 'night' }, { k: 'reply', t: '< x', rid: 2 }]);
   assert.equal(sent.at(-1).bind, 1, 'the call this reply answered');
   assert.equal(sent.at(-1).game.s, 41, 'the game\'s age');
   assert.deepEqual(sent.at(-1).adv, [{ k: 'night', t: 'night in 45 s, no shelter, no shield', sev: 1 }], 'the advice as it stands, one per kind');
@@ -153,7 +153,7 @@ test('feed: start_game\'s reply carries no state: the status line has health, fo
   const text = { content: [{ type: 'text', text: 'New game' }] };
   const bot = { id: 'g7', status: 'ready', body: { bot: { entity: {}, health: 19.6, food: 18, time: { timeOfDay: 1000 } }, attribution: () => ({ agent: 0, reflex: 0 }) } };
   feed.reply(bot, 'start_game', { adult: true }, text);
-  assert.deepEqual(sent.at(-1), { id: 'g7', lines: [{ k: 'call', t: '> start_game', say: 'Start a new game', tool: 'start_game', raw: '{"adult":true}', rid: 1 }, { k: 'reply', t: '< New game', rid: 1 }], status: 'HP 20/20  FOOD 18/20  DAY 07:00  |  Agent 0 | Reflex 0', st: { hp: 20, food: 18, clock: 'DAY 07:00', ticks: 1000, agent: 0, reflex: 0 }, live: { mode: 'idle', reason: 'waiting' }, sub: null, game: { id: 'g7', s: 0 } });
+  assert.deepEqual(sent.at(-1), { id: 'g7', lines: [{ k: 'call', t: '> start_game', say: 'Start a new game', tool: 'start_game', raw: '{"adult":true}', rid: 1, src: 'agent' }, { k: 'reply', t: '< New game', rid: 1 }], status: 'HP 20/20  FOOD 18/20  DAY 07:00  |  Agent 0 | Reflex 0', st: { hp: 20, food: 18, clock: 'DAY 07:00', ticks: 1000, agent: 0, reflex: 0 }, live: { mode: 'idle', reason: 'waiting' }, sub: null, game: { id: 'g7', s: 0 } });
   const mineai = { id: 'g8', status: 'ready', body: { snapshot: () => ({ health: 20, food: 20, timeOfDay: 0, dimension: 'overworld' }) } };
   feed.reply(mineai, 'start_game', { adult: true }, text);
   assert.equal(sent.at(-1).status, 'HP 20/20  FOOD 20/20  DAY 06:00');
@@ -202,7 +202,8 @@ test('MCP: each call and its results reach the game\'s stream as terminal lines'
   const c = new Client({ name: 'term-test', version: '1' });
   t.after(async () => { await c.close().catch(() => {}); await agent.stop('test over'); fs.rmSync(dir, { recursive: true, force: true }); });
   await c.connect(new StreamableHTTPClientTransport(new URL(`${agent.url}/mcp`)));
-  const game = /game (g\w+)/.exec((await c.callTool({ name: 'start_game', arguments: { adult: true } })).content[0].text)[1];
+  // live: false (the user does not watch): play needs no live_view first on this server with a stream
+  const game = /game (g\w+)/.exec((await c.callTool({ name: 'start_game', arguments: { adult: true, live: false } })).content[0].text)[1];
   await c.callTool({ name: 'play_sequence', arguments: { steps: [{ skill: 'collect', args: { block: 'oak_log', n: 2 } }] } });
   await c.callTool({ name: 'end_game', arguments: {} });
   const lines = updates.filter((u) => u.id === game).flatMap((u) => u.lines.map((l) => `${l.k} ${l.t}`));
@@ -218,7 +219,7 @@ test('live_view\'s page: the player at the video\'s shape, as wide as the panel 
   const embed = 'https://www.facebook.com/plugins/video.php?href=https%3A%2F%2Fwww.facebook.com%2F1%2Fvideos%2F2%2F&show_text=false&width=1280';
   const tall = liveViewHtml({ state: 'live', game: 'g1', embedUrl: embed, aspect: '1080/1920' });
   assert.match(tall, /#v\{position:relative;aspect-ratio:1080\/1920;width:min\(100%,calc\(\(100vh - 28px\)\*0\.5625\)\);margin:0 auto;background:#000;overflow:hidden\}/);
-  assert.ok(Buffer.byteLength(tall) < 3072);
+  assert.ok(Buffer.byteLength(tall) < 6144);
   assert.match(liveViewHtml({ state: 'live', game: 'g1', embedUrl: embed, aspect: '1080/1350' }), /aspect-ratio:1080\/1350;width:min\(100%,calc\(\(100vh - 28px\)\*0\.8\)\)/);
   // square (the UI layout): a 1000x1050 desktop panel gets the whole width, no bars at the sides
   assert.match(liveViewHtml({ state: 'live', game: 'g1', embedUrl: embed, aspect: '1080/1080' }), /aspect-ratio:1080\/1080;width:min\(100%,calc\(\(100vh - 28px\)\*1\)\)/);

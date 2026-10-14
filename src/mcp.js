@@ -22,6 +22,7 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import { z } from 'zod';
 import { createTracker, goalOf, planText, lexiconFrom, GOAL_NAMES } from './report.js';
 import { HUNT_DROPS, dropOf } from './mineai/skills.js';
+import { describeRules } from './mineai/care.js';
 import { tolerate } from './tolerant.js';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
@@ -41,6 +42,7 @@ export const SERVER_INFO = Object.freeze((() => {
 
 /** Why the camera does not answer, for live_view: what the camera last said (v.reason), or a guess. */
 const downWords = (v) => (v?.reason ? `the camera is not running: ${String(v.reason).slice(0, 200)}.` : 'the camera does not answer (it may be starting, or stopped).');
+import { moderator } from './moderation.js';
 
 const CALL_MS = 45_000; // every reply within 45 s: MCP clients commonly give up after 60 s (a long skill keeps going)
 /** Of a call's time, what building the reply may take (the state text scans the blocks around: ~850 ms on Paper). */
@@ -49,16 +51,18 @@ const replyBudget = (callMs) => Math.min(2_000, Math.round(callMs / 20));
 export const WHY_MAX = 140;
 /** The agent's plan with a call (play, play_sequence: plan): its next few steps and fallbacks; longer is cut at a word. */
 export const PLAN_MAX = 400;
-const IDLE_MS = 10 * 60_000; // a game nobody has called for this long (and that runs nothing) ends, freeing its bot (GAME_IDLE_MIN)
+const IDLE_MS_DEFAULT = 10 * 60_000; // a game nobody has called for this long (and that runs nothing) ends, freeing its bot (GAME_IDLE_MIN)
+/** In-game chat (say) is the owner's when PUBLIC_CHAT is off: an outside agent's words go in why and plan instead. */
+export const SAY_CLOSED_TEXT = 'say (in-game chat) is off for games on this server: nothing was run. Your words reach viewers through why and plan on every play call.';
 const IDLE_SESSION_MS = 10 * 60_000; // an MCP session without a game is dropped after 10 minutes without calls
 const JOIN_WAIT_MS = 30_000;
 /** start_game waits this long for a Minecraft server that is still starting, then says SERVER_STARTING (retry in N s). */
 const SERVER_WAIT_MS = 25_000;
 const SERVER_RETRY_S = 15;
 const MAX_STEPS = 32;
-/** start_game's last line, until live_view is called in the game (LIVE_VIEW=facebook). */
-export const LIVE_NEXT = 'Next: call live_view now and show the HTML it returns, exactly as returned, as a web artifact in your preview panel, before you play.';
-/** The top line of a play, play_sequence or get_state reply while live_view has not been called (the first, then every 5th). */
+/** start_game's first line, until live_view is called in the game (LIVE_VIEW=facebook). */
+export const LIVE_NEXT = 'Next: call live_view now and show the HTML it returns, exactly as returned, as a web artifact in your preview panel, before you play (play waits for it).';
+/** The top line of every play, play_sequence or get_state reply while live_view has not been called in the game. */
 export const LIVE_NUDGE = 'Your user cannot see the game yet: call live_view and show its HTML in your preview panel.';
 /** The same for the local watch page (LIVE_VIEW=local): a link the user opens in a browser. */
 export const LOCAL_NEXT = 'Next: call live_view now and give your user the watch page link it returns (they open it in a browser), before you play.';
@@ -69,7 +73,12 @@ export const liveNudge = (mode) => (mode === 'local' ? LOCAL_NUDGE : mode === 'f
 /** A live view mode from the old boolean (true: the Facebook live, false: off) or a mode name. */
 const modeOf = (live) => (live === true ? 'facebook' : live === false || live === undefined || live === null ? 'off' : String(live));
 /** The top line of a play or play_sequence reply sent without why or plan (the first such call, then every 5th). */
-export const WHY_NUDGE = 'Viewers see your why and plan under the video: pass both on every play call.';
+export const NEED_LIVE_TEXT = 'Your user wants to watch: call live_view first and show the HTML it returns, exactly as returned, as a web artifact in your preview panel; then send this call again. If your user said they don\'t want to watch, call start_game with live: false.';
+/** The same for the local watch page (LIVE_VIEW=local). */
+export const LOCAL_NEED_TEXT = 'Your user wants to watch: call live_view first and give your user the watch page link it returns; then send this call again. If your user said they don\'t want to watch, call start_game with live: false.';
+/** What play answers with NEED_LIVE_VIEW in a live view mode. */
+export const needLiveText = (mode) => (mode === 'local' ? LOCAL_NEED_TEXT : NEED_LIVE_TEXT);
+export const WHY_NUDGE = 'Viewers see your why and plan under the video: pass both on every play call. If your tool list has no why or plan fields, your integration is out of date: re-read this server\'s tools (tools/list) or rebuild the integration.';
 const MAX_BODY = 64 * 1024; // the SDK's own default is 4 MiB, kept for the session's life in clientInfo
 const STATION_RADIUS = 24; // craft and smelt use a table or furnace this close (REUSE_RADIUS in src/stations.js)
 
@@ -242,9 +251,9 @@ const REPLY_OUT = z.object({
   queue: z.object({ running: z.string().nullable(), waiting: z.number() }),
   changed: z.record(z.string(), z.number()).describe('inventory change of every finished step in this reply'),
   state: z.record(z.string(), z.any()).nullable().describe('health, food, pos, inventory, timeLeftS'),
-  onItsOwn: z.array(z.object({ seq: z.number(), agoS: z.number(), source: z.enum(['care', 'reflex']), kind: z.string(), ok: z.boolean(), text: z.string() }).loose()).optional().describe('what the body did by itself since your last reply (care: its own plans between your calls, full mode only; reflex: fights, meals, deaths)'),
+  onItsOwn: z.array(z.object({ seq: z.number(), agoS: z.number(), source: z.enum(['care', 'reflex', 'rule', 'body']), kind: z.string(), ok: z.boolean(), text: z.string() }).loose()).optional().describe('what the body did by itself since your last reply (care: its own plans between your calls, full mode only; reflex: fights, meals, deaths)'),
   advice: z.array(z.object({ kind: z.string(), text: z.string(), hint: z.object({ skill: z.string(), args: z.record(z.string(), z.any()) }).optional() }).loose()).optional().describe('what needs doing that the body will not do by itself, most urgent first; hint: a skill that would do it'),
-  attribution: z.object({ agent: z.number(), reflex: z.number(), care: z.number(), agentPct: z.number().nullable() }).optional().describe('get_state: who acted this game (your skills, the body\'s reflexes, its own plans in full mode)'),
+  attribution: z.object({ agent: z.number(), reflex: z.number(), care: z.number(), agentPct: z.number().nullable(), rule: z.number().optional(), body: z.number().optional(), decidedPct: z.number().nullable().optional() }).loose().optional().describe('get_state: who acted this game (your skills, the body\'s reflexes, its own plans in full mode)'),
 }).loose();
 
 /**
@@ -267,14 +276,14 @@ export function instructionsText({ callMs = 90_000, leaseMin = 30, idleMin = 5, 
   return [
     'You play Minecraft here: your own bot in a survival Minecraft world, by yourself: once the game has started, play on without asking your user anything. Use only these tools, not the server\'s web pages.',
     'Rules:',
-    `1. Start: start_game, with goal when your user named one (${GOAL_NAMES.join(', ')}, or their words: the server counts goals like "kill 100 pigs", "collect 64 cobblestone", "craft 20 torches", "reach y -59", "build a hut", "survive 2 nights"); its reply has the plan, with how to do each part${view}.`,
+    `1. Start: start_game, with goal when your user named one (${GOAL_NAMES.join(', ')}, or their words: the server counts goals like "kill 100 pigs", "collect 64 cobblestone", "craft 20 torches", "reach y -59", "build a hut", "survive 2 nights"); its reply has the plan, with how to do each part${view}${view ? ': play and play_sequence are refused (code NEED_LIVE_VIEW) until you have. Only when your user said they do not want to watch, start_game with live: false' : ''}.`,
     '2. A new goal: whenever your user gives a new or changed goal during the game, call set_goal with it (their words, or a preset) before you play on; the stream, every reply\'s state and the report follow the goal set last, and the report keeps every goal with its time.',
     `3. Play: play_sequence for several steps in a row (play for one); each reply carries the results and the state within ${Math.round(callMs / 1000)} s, and get_state waits for a skill still running. A big count (100 pigs, 500 blocks) takes many steps: a step takes at most 64, so split it across calls and watch the goal's count in each reply.`,
     `4. why and plan: pass both on every play and play_sequence call. why: one short sentence in plain words, what you are doing and why. plan: your next few steps and what you will do if one fails, in your own words (up to about 400 characters). ${mode === 'off' ? 'The report keeps them as your own words.' : 'Viewers of the live view see both as your own words, and the report keeps them.'}`,
     `5. ${care ? care.trim() : 'You make every plan: the body runs the skills you send.'}`,
     `6. Time: call at least every 4 minutes; a game with no calls for ${idleMin} minutes ends. A game lasts ${leaseMin} min.`,
     '7. Deaths: after a death, either pick_up with death_items: true within 5 minutes (the items despawn) or start over where you respawned.',
-    '8. Failures: if the same step fails 3 times, change your plan instead of sending it again.',
+    '8. Failures: if the same step fails 3 times, change your plan instead of sending it again: the Body advice then starts with what is stuck, the likely cause and what else to try.',
     '9. The end: when the goal is reached, the game ends or you stop, call end_game: its reply is the full report (the goal, milestones with times, deaths with causes, who acted, and a decision log from your why texts and the advice you followed or declined); show it to your user as it is. game_report gives the same during the game.',
     `The skills this server offers (${skillCount}): ${skillNames}. The play tool's description gives each one's arguments; this list is the server's own, so use it rather than notes about another server.`,
   ].join('\n');
@@ -325,14 +334,14 @@ export function createMcp(hooks) {
   const skills = hooks.skills ?? skillSet();
   const SKILLS = skillList(skills.mcpSkills);
   // the skills this server offers, by name, in the server instructions and in both play tools (one source: skills),
-  // so a client never relies on notes about another server (The agent's own notes listed only some, and it had to guess hunt)
+  // so a client never relies on notes about another server (the agent's own notes listed only some, and it had to guess hunt)
   const SKILL_NAMES_TEXT = skills.names.join(', ');
   // a body that looks after itself between calls (BODY=mineai, src/mineai/care.js) says so in the instructions
   // advise (the default): the player plans; full: the body also carries out its own survival plans; off: neither
   const careMode = hooks.careMode ?? 'advise';
   const CARE_TEXT = !skills.names.includes('armor') || careMode === 'off' ? ''
     : careMode === 'full' ? ' Between your calls the body looks after itself: it shelters at night (or sleeps when it carries a bed), eats and hunts when hungry, wears and crafts armor, crafts a spare before a tool breaks, and goes back for its items after a death; its reflexes fight or flee from mobs. Every reply says what it did on its own (structuredContent.onItsOwn); the policy skill changes it.'
-      : ' You plan everything: the body acts by itself only through its reflexes (it fights back or flees when attacked, eats only when starving at food 4 or less, surfaces for air, leaves fire and lava, gets its footing back), each of which the policy skill switches (defend, eat, escape). Every reply carries "Body advice": what needs doing that the body will not do by itself (night coming with no shelter or shield, low food, a tool about to break, items to recover after a death), with the facts and the skill that would do it (shelter and shield are skills too); following it or not is your decision. Replies also say what the reflexes did (structuredContent.onItsOwn), and get_state and end_game count who acted this game (structuredContent.attribution).';
+      : ' You decide everything: the body does nothing by itself, not even between your calls, except by rules you set (start_game rules, or the policy skill at any time): defend (fight back, raise the shield, wall in when badly hurt), flee (withdraw from a hostile mob), escape (out of water, fire and lava, back on its feet) and eat_below N (eat at food N or less). Every game starts with none. A rule acts within a second; your calls take seconds to minutes, and a zombie hits in one second: without defend and escape the bot dies more. Decide at the start. Every reply carries "Body advice": what needs doing (night coming with no shelter or shield, low food, a tool about to break, items to recover after a death), with the facts and the skill that would do it; it is information, the body does not act on it. Actions under your rules count as decided by you; get_state and end_game count who acted (structuredContent.attribution).';
   const now = hooks.now ?? Date.now; // the web's clock (leases, idle, repeats); call deadlines run on the real one
   const callMs = hooks.callMs ?? CALL_MS;
   /** How long a call waits for its steps: callMs less the time its reply takes to build, so the reply leaves within callMs. */
@@ -345,9 +354,10 @@ export function createMcp(hooks) {
     const list = [extra?.signal, http.getStore()?.cut.signal].filter(Boolean);
     return list.length > 1 ? AbortSignal.any(list) : list[0];
   };
-  const limits = { sessions: 200, perAddress: 20, ...(hooks.limits ?? {}) };
+  const limits = { sessions: 200, perAddress: 20, perMinute: 120, ...(hooks.limits ?? {}) };
+  const words = moderator();
   const leaseMin = Math.round((hooks.leaseMs ?? 600_000) / 60_000);
-  const idleMs = hooks.idleMs ?? IDLE_MS;
+  const idleMs = hooks.idleMs ?? IDLE_MS_DEFAULT;
   const idleMin = Math.round(idleMs / 60_000);
   // what live_view does here: the camera's watch page (local), a Facebook live (facebook), or nothing (off)
   const liveMode = hooks.liveMode ?? (hooks.liveView ? 'facebook' : 'off');
@@ -370,10 +380,21 @@ export function createMcp(hooks) {
   const game = (entry) => lookupGame(entry).s;
   const text = (t) => ({ content: [{ type: 'text', text: t }] });
   const fail = (t) => ({ content: [{ type: 'text', text: t }], isError: true });
+  /**
+   * start_game refused before a game began (src/web.js newSession), as a typed answer: SERVER_FULL (every game in use:
+   * the queue place and when to try), RATE_LIMITED (this address's games or starts), CLOSED (public play is off),
+   * NOT_ALLOWED (a banned address); retryAfterS when known.
+   */
+  const startRefused = (e) => {
+    const retryAfterS = Number(e?.headers?.['retry-after']) || null;
+    const code = e?.extra?.closed ? 'CLOSED' : e?.status === 403 ? 'NOT_ALLOWED' : e?.status === 503 && e?.extra?.queue ? 'SERVER_FULL' : e?.status === 429 ? 'RATE_LIMITED' : 'FAILED';
+    const text = code === 'FAILED' ? `could not start: ${e?.message ?? e}` : `${code}: ${e.message}`;
+    return { ...fail(text), structuredContent: { code, ...(retryAfterS ? { retryAfterS } : {}), ...(e?.extra?.queue ? { queue: e.extra.queue } : {}) } };
+  };
   const queueOf = (s) => {
     let q = queues.get(s);
     if (!q) {
-      q = createQueue({ start: (skill, args) => hooks.startAction(s, skill, args), now });
+      q = createQueue({ start: (skill, args, meta) => hooks.startAction(s, skill, args, meta), now });
       queues.set(s, q);
     }
     return q;
@@ -492,9 +513,9 @@ export function createMcp(hooks) {
 
   /** One thing the body did by itself, as a reply line: "- 41 s ago, night: closed itself in at ... (ok)". */
   const ownAgo = (e) => Math.max(0, Math.round((now() - Date.parse(e.at)) / 1000));
-  const ownLine = (e) => `- ${ownAgo(e)} s ago, ${e.source === 'reflex' ? 'reflex' : 'on its own'}, ${e.kind}: ${e.text}${e.ok === false ? ' (did not work)' : ''}`;
+  const ownLine = (e) => `- ${ownAgo(e)} s ago, ${e.source === 'rule' ? `by your rule ${e.rule}` : e.source === 'body' ? 'reflex, no rule of yours' : e.source === 'reflex' ? 'reflex' : 'on its own'}, ${e.kind}: ${e.text}${e.ok === false ? ' (did not work)' : ''}`;
   const adviceLine = (a) => `- ${a.text}${a.hint ? ` (to do it: ${a.hint.skill} ${JSON.stringify(a.hint.args ?? {})})` : ''}`;
-  const ownOut = (e) => ({ seq: e.seq, agoS: ownAgo(e), source: e.source, kind: e.kind, ok: e.ok !== false, text: e.text });
+  const ownOut = (e) => ({ seq: e.seq, agoS: ownAgo(e), source: e.source, kind: e.kind, ok: e.ok !== false, text: e.text, ...(e.rule ? { rule: e.rule, ruleSet: e.ruleSet ?? null } : {}) });
   /** The body's own actions a reply carries count as told once its HTTP response was written out in full. */
   function deliverOwnWhenSent(s, seq, extra) {
     const mark = () => { s.ownDelivered = Math.max(s.ownDelivered ?? 0, seq); };
@@ -542,7 +563,11 @@ export function createMcp(hooks) {
     const lines = steps.filter((st) => st.status !== 'cancelled' || st.result).map((st) => stepLine(st, numbered)).join('\n');
     const main = `${lead.trimEnd()}${lead.trim() && lines ? '\n' : ''}${lines}${tail}`.trim();
     // advise mode (BODY=mineai, src/mineai/care.js): what needs doing that the body will not do by itself
-    const advice = s && typeof s.body?.advice === 'function' ? safely(() => s.body.advice(), []) ?? [] : [];
+    const own0 = s && typeof s.body?.advice === 'function' ? safely(() => s.body.advice(), []) ?? [] : [];
+    // the stuck advice first (a kind of step that makes no progress), and once the time left for the goal
+    const time = s?.timeNote ?? null;
+    if (s && time) s.timeNote = null;
+    const advice = [...(s?.stuck?.advice ? [s.stuck.advice] : []), ...(time ? [time] : []), ...own0].slice(0, 5);
     const attribution = withAttribution && s && typeof s.body?.attribution === 'function' ? safely(() => s.body.attribution(), null) : null;
     const blocks = [
       earlier.length ? `Finished since your last call:\n${earlierText(earlier)}` : '',
@@ -554,7 +579,8 @@ export function createMcp(hooks) {
     ];
     const body = blocks.filter(Boolean).join('\n\n');
     const structured = {
-      code: code ?? firstCode(steps) ?? cancelledCode(steps) ?? firstCode(earlier) ?? cancelledCode(earlier),
+      // code false: none, whatever an earlier step's result says (stop with nothing running: g0a414c's "FAILED")
+      code: code === false ? null : code ?? firstCode(steps) ?? cancelledCode(steps) ?? firstCode(earlier) ?? cancelledCode(earlier),
       game: s?.id ?? null,
       steps: steps.map(report),
       earlier: earlier.map(report),
@@ -563,7 +589,7 @@ export function createMcp(hooks) {
       state: shortState(s),
       ...(own.length ? { onItsOwn: own.map(ownOut) } : {}),
       ...(advice.length ? { advice } : {}),
-      ...(attribution ? { attribution: { agent: attribution.agent, reflex: attribution.reflex, care: attribution.care, agentPct: attribution.agentPct } } : {}),
+      ...(attribution ? { attribution: { agent: attribution.agent, reflex: attribution.reflex, care: attribution.care, agentPct: attribution.agentPct, ...(attribution.rule != null ? { rule: attribution.rule, body: attribution.body, decidedPct: attribution.decidedPct } : {}) } } : {}),
       ...more,
     };
     return { content: [{ type: 'text', text: body }], structuredContent: structured, ...(isError ? { isError: true } : {}) };
@@ -571,6 +597,95 @@ export function createMcp(hooks) {
 
   /** A call that was not accepted: nothing ran. */
   const refuse = (s, extra, code, message, more = {}) => reply(s, extra, { lead: message, code, isError: true, more });
+  /**
+   * The stuck detector (after a real game, g0a414c: nine minutes of collect obsidian that never moved): the
+   * same kind of step (collect a block, hunt a mob, walk to one area, build or a portal action) with no progress over 3
+   * calls, or 2 calls and 4 minutes, puts a "stuck" item first in the Body advice of every reply until it moves: what
+   * does not move, the likely cause the body can see, and 2 or 3 things to do instead with the exact call. Information
+   * only: the calls run as sent. Also, once, when the lease has under 8 minutes and the goal is not reached, what it
+   * still needs.
+   */
+  async function stuckCheck(s, steps = []) {
+    if (!s?.body) return;
+    const t = now();
+    const book = (s.stuckBook ??= new Map());
+    const inv = safely(() => s.body.inventory?.() ?? {}, {}) ?? {};
+    // an item count up since the kind stalled: it moved
+    for (const [k, e] of book) if (e.item && (inv[e.item] ?? 0) > e.count) book.delete(k);
+    // this call's steps and the ones that finished since: a confirmed step (a walk that got there, a build that stood)
+    // moved its kind; one that ran without that is one more try. Each step counts once; one that never ran (still
+    // queued, or cancelled before it ran) is no try.
+    const counted = (s.stuckSeen ??= new WeakSet());
+    const seen = new Set();
+    // where the bot is: a walk that ends closer to its target moved, though it did not get there
+    const pos = safely(() => s.body.bot?.entity?.position ?? null, null);
+    for (const st of [...(steps ?? []), ...(safely(() => queueOf(s).finished(steps) ?? [], []) ?? [])]) {
+      const k = stuckKey(st);
+      if (!k) continue;
+      if (st.status === 'confirmed') { book.delete(k.key); counted.add(st); continue; }
+      if (!st.startedAt || counted.has(st)) continue;
+      // a walk still on its way is no failed try (real game g0842ff, 2026-10-14: "stuck" while a 3-minute climb
+      // out of a cave was going on, and it got there): it counts once it has ended
+      const walk = st.skill === 'go_to';
+      if (walk && !['failed', 'cancelled'].includes(st.status)) continue;
+      counted.add(st);
+      if (seen.has(k.key)) continue;
+      seen.add(k.key);
+      const e = book.get(k.key) ?? { ...k, calls: 0, firstAt: t, count: k.item ? (inv[k.item] ?? 0) : 0 };
+      // the distance left after a walk: 8 blocks or more less than after the walk before is progress, a fresh start
+      if (walk && pos && Number.isFinite(st.args?.x)) {
+        const left = Math.hypot(pos.x - st.args.x, pos.y - (st.args.y ?? pos.y), pos.z - st.args.z);
+        if (Number.isFinite(e.left) && left <= e.left - 8) { e.calls = 0; e.firstAt = t; }
+        e.left = Math.min(e.left ?? Infinity, left);
+      }
+      e.calls += 1;
+      e.lastAt = t;
+      e.last = { args: st.args ?? {}, result: st.result?.result ?? st.result ?? null };
+      book.set(k.key, e);
+    }
+    // a kind not tried for 5 minutes: the agent moved on (g0842ff: two walks into a cavern at 7 min said "stuck" from 11
+    // to 19 min, the game long past them)
+    for (const [k, e] of book) if (t - (e.lastAt ?? e.firstAt) > 5 * 60_000) book.delete(k);
+    // 3 tries without progress, or 2 over 4 minutes with the last of them recent
+    const worst = [...book.values()].filter((e) => e.calls >= 3 || (e.calls >= 2 && t - e.firstAt >= 4 * 60_000 && t - (e.lastAt ?? e.firstAt) <= 2 * 60_000)).sort((a, b) => b.calls - a.calls)[0];
+    if (!worst) { s.stuck = null; }
+    else if (!s.stuck || s.stuck.key !== worst.key || s.stuck.calls !== worst.calls || t - s.stuck.at > 120_000) {
+      const why = await Promise.race([Promise.resolve(safely(() => s.body.stuckWhy?.(worst.key, worst.last) ?? null)).catch(() => null), new Promise((r) => { setTimeout(() => r(null), 5_000).unref?.(); })]);
+      const mins = Math.max(1, Math.round((t - worst.firstAt) / 60_000));
+      const what = worst.item ? `${worst.item.replace(/_/g, ' ')} ${inv[worst.item] ?? 0}, none more for ${worst.calls} calls / ${mins} min` : `no progress for ${worst.calls} calls / ${mins} min`;
+      const options = (why?.options ?? []).slice(0, 3);
+      const hint = options.find((o) => o.hint && safely(() => skills.validate(o.hint.skill, o.hint.args ?? {}).ok, false))?.hint ?? null;
+      s.stuck = {
+        key: worst.key, calls: worst.calls, at: t,
+        advice: { kind: 'stuck', text: `stuck: ${worst.label} (${what})${why?.text ? `; ${why.text}` : ''}${options.length ? `. Try: ${options.map((o) => o.text).join('; or ')}` : ''}`, ...(hint ? { hint } : {}) },
+      };
+      hooks.log.event('mcp_stuck', { game: s.id, key: worst.key, calls: worst.calls, mins });
+    }
+    // the time left against what the goal still needs, once
+    const left = s.expiresAt - t;
+    if (!s.timeTold && left > 0 && left < 8 * 60_000 && s.tracker) {
+      const p = safely(() => s.tracker.progress(), null);
+      const todo = (p?.list ?? []).filter((m) => m.atS === null || (m.of && m.done < m.of)).map((m) => m.t);
+      if (p && p.key !== 'free' && !p.reached && todo.length) { // a goal set (free play has none to fall short of)
+        s.timeTold = true;
+        s.timeNote = { kind: 'time', text: `${Math.max(1, Math.round(left / 60_000))} min left in this game; the goal still needs: ${todo.join(', ')}` };
+      }
+    }
+  }
+  /** The kind of a step for the stuck detector: {key, label, item?} or null (crafts, eating and the like do not stall). */
+  function stuckKey(st) {
+    const a = st?.args ?? {};
+    if (st?.skill === 'collect' && a.block) return { key: `collect:${a.block}`, label: `collecting ${a.block.replace(/_/g, ' ')}`, item: lex.dropOf(a.block) ?? a.block };
+    if (st?.skill === 'hunt' && a.mob) return { key: `hunt:${a.mob}`, label: `hunting ${a.mob}`, item: a.drop ?? null };
+    if (st?.skill === 'go_to' && Number.isFinite(a.x)) return { key: `go_to:${a.x >> 3},${a.y >> 3},${a.z >> 3}`, label: `walking to ${a.x} ${a.y} ${a.z}`, item: null };
+    if (st?.skill === 'build' && a.blueprint) return { key: `build:${a.blueprint}`, label: `building ${a.blueprint.replace(/_/g, ' ')}`, item: null };
+    if (st?.skill === 'portal' && a.action) return { key: `portal:${a.action}`, label: `portal ${a.action}`, item: null };
+    return null;
+  }
+  /** A game whose play waits for live_view: the server has the live channel, the user watches, and it was not called. */
+  const liveRequired = (s) => hooks.liveEnabled === true && s && !s.liveViewed && s.liveOff !== true;
+  /** A game in line for the camera, in words. */
+  const queuedText = (id, q) => `Live view of game ${id}: the camera is filming another game right now; yours runs normally. You are number ${q?.position ?? '?'} in line (about ${q?.waitMin ?? '?'} min). Call live_view again later, or keep playing: when the camera reaches you, your stream starts.`;
 
   /** The dry-run check for steps on this game: the plan, or null when the check cannot run (then nothing is refused). */
   function checkSteps(s, steps) {
@@ -618,6 +733,10 @@ export function createMcp(hooks) {
     const signal = signalOf(extra);
     let s;
     try { s = need(entry); } catch (e) { return refuse(null, extra, 'NOT_STARTED', e.message); }
+    // the user watches (after a real game, g71c9f5): no step runs before live_view in a game with a
+    // live view, unless the user said they do not want to watch (start_game live: false). A server without the live
+    // channel asks for nothing; live_view counts whatever it answered (capped, test, off)
+    if (liveRequired(s)) return refuse(s, extra, 'NEED_LIVE_VIEW', needLiveText(liveMode));
 
     const bad = [];
     // arguments read the way they were meant where that is unambiguous (src/tolerant.js): positions in any common
@@ -634,6 +753,11 @@ export function createMcp(hooks) {
       return { skill: p.skill, args: v.args };
     });
     if (read.length) hooks.log.event('mcp_args_read', { game: s.id, tool, read: read.slice(0, 16).map((x) => x.slice(0, 200)), ok: !bad.length });
+    // in-game chat is the owner's when PUBLIC_CHAT is off (other players and the stream would read it)
+    if (steps.some((st) => st?.skill === 'say') && !entry.owner && !hooks.publicChat) {
+      hooks.log.event('mcp_refused', { session: String(entry.transport?.sessionId ?? '').slice(0, 8), game: s.id, code: 'NOT_ALLOWED', message: 'say' });
+      return refuse(s, extra, 'NOT_ALLOWED', SAY_CLOSED_TEXT);
+    }
     if (bad.length) {
       const one = tool === 'play';
       return refuse(s, extra, 'BAD_ARGS', `${one ? bad[0].replace(/^1\. /, '') : bad.join('\n')}\nNothing was run: fix ${bad.length > 1 ? 'these steps' : one ? 'it' : 'that step'} and send the call again.`);
@@ -699,6 +823,7 @@ export function createMcp(hooks) {
 
     const call = q.submit(key, { sig, requestId, label: (no) => `your ${tool} #${no}`, planned });
     await wait(call.settled, end - Date.now(), signal);
+    await stuckCheck(s, call.steps);
     const added = addedLead(planned);
     return reply(s, extra, {
       steps: call.steps,
@@ -771,6 +896,20 @@ export function createMcp(hooks) {
     const server = new McpServer({ name: SERVER_INFO.name, version: SERVER_INFO.version }, {
       instructions: instructionsText({ callMs, leaseMin, idleMin, skillNames: SKILL_NAMES_TEXT, skillCount: skills.names.length, care: CARE_TEXT, live: liveMode }),
     });
+    if (hooks.moderate !== false) {
+      // every word an outside agent sends is cleaned before anything keeps or shows it (its why and plan on the stream,
+      // its goal, the console's arguments, the report, the log): offensive words become "[removed]" (src/moderation.js).
+      // Installed first, so it runs before the log and the feed see the call
+      const register = server.registerTool.bind(server);
+      server.registerTool = (name, def, handler) => register(name, def, async (args, extra) => {
+        const r = safely(() => words.cleanValue(args), null);
+        if (r?.removed) {
+          safely(() => hooks.log.event('moderation', { session: String(entry.transport?.sessionId ?? '').slice(0, 8), game: safely(() => game(entry)?.id, null) ?? null, tool: name, removed: r.removed, fields: r.fields.slice(0, 8) }));
+          return handler(r.value, extra);
+        }
+        return handler(args, extra);
+      });
+    }
     {
       // every call in the log (a review of real games: refusals, calls and the advice shown were in no log): the game, the
       // tool, a short and scrubbed summary of its arguments, the reply's code, its steps' outcomes and the advice
@@ -778,26 +917,27 @@ export function createMcp(hooks) {
       server.registerTool = (name, def, handler) => register(name, def, async (args, extra) => {
         const t0 = Date.now();
         const before = safely(() => game(entry), null);
+        // The agent's calls in its game, counted (a rule says with which call it was set)
+        if (before) { before.callNo = (before.callNo ?? 0) + 1; safely(() => before.body?.noteCall?.(before.callNo)); }
         let out = null;
         try {
           out = await handler(args, extra);
-          // the user cannot see the game until live_view's HTML is shown (a real game, 2026-10-13, g08370a: the agent,
-          // run as a background task, went from start_game straight to play_sequence): a line at the top of the reply,
-          // on the first call without it and every 5th after; the call itself is never held up
+          // the user cannot see the game until live_view's HTML is shown (real games g08370a and g71c9f5,
+          // 2026-10-13: the agent went from start_game straight to play_sequence and never called it): a line at the top of
+          // every play, play_sequence and get_state reply until it is called; the call itself is never held up
           // a play call without why or plan leaves the stream's thinking band empty (g08370a: none on any call): a line
           // at the top too, on the first such call and every 5th after (below the live view's line when both apply)
           if (['play', 'play_sequence'].includes(name)) safely(() => {
             const g = game(entry);
             const has = (v) => typeof v === 'string' && v.trim().length > 0;
-            if (!g || (has(args?.why) && has(args?.plan)) || !out?.content?.[0] || typeof out.content[0].text !== 'string') return;
+            if (!g || (has(args?.why) && has(args?.plan)) || out?.structuredContent?.code === 'NEED_LIVE_VIEW' || !out?.content?.[0] || typeof out.content[0].text !== 'string') return;
             g.wordlessCalls = (g.wordlessCalls ?? 0) + 1;
             if (g.wordlessCalls % 5 === 1) out.content[0].text = `${WHY_NUDGE}\n\n${out.content[0].text}`;
           });
           if (['play', 'play_sequence', 'get_state'].includes(name)) safely(() => {
             const g = game(entry);
-            if (!LIVE_NUDGE_TEXT || !g || g.liveViewed || !out?.content?.[0] || typeof out.content[0].text !== 'string') return;
-            g.unseenCalls = (g.unseenCalls ?? 0) + 1;
-            if (g.unseenCalls % 5 === 1) out.content[0].text = `${LIVE_NUDGE_TEXT}\n\n${out.content[0].text}`;
+            if (!LIVE_NUDGE_TEXT || !g || g.liveViewed || g.liveOff || out?.structuredContent?.code === 'NEED_LIVE_VIEW' || !out?.content?.[0] || typeof out.content[0].text !== 'string') return;
+            out.content[0].text = `${LIVE_NUDGE_TEXT}\n\n${out.content[0].text}`;
           });
           // the game's report: the call, its why, the advice before it, the milestones (src/report.js)
           safely(() => {
@@ -846,7 +986,7 @@ export function createMcp(hooks) {
       Object.assign(entry, { token: null, handle: null, endedWhy: why });
     };
 
-    // the client's protocol version and what it says it is, once per MCP session (The agent writes its own client)
+    // the client's protocol version and what it says it is, once per MCP session (the agent writes its own client)
     const low = server.server;
     const init = typeof low._oninitialize === 'function' ? low._oninitialize.bind(low) : null;
     if (init) {
@@ -854,6 +994,12 @@ export function createMcp(hooks) {
         const result = await init(request);
         const p = request?.params ?? {};
         entry.client = { name: clean(p.clientInfo?.name, 80), version: clean(p.clientInfo?.version, 40) };
+        // the client's name is the HUD's caller: an offensive one becomes "agent"
+        const named = safely(() => words.clean(entry.client.name ?? ''), null);
+        if (named?.removed) {
+          hooks.log.event('moderation', { session: sid8(), game: null, tool: 'initialize', removed: named.removed, fields: ['clientInfo.name'] });
+          entry.client.name = 'agent';
+        }
         hooks.log.event('mcp_client', { session: sid8(), protocolVersion: clean(p.protocolVersion, 20), negotiated: result?.protocolVersion ?? null, client: entry.client });
         return result;
       };
@@ -863,10 +1009,13 @@ export function createMcp(hooks) {
       description: `Starts your own Minecraft bot in a survival world (a NEW bot at a fresh spot with an empty inventory), or resumes the game of this connection, or (game set to the handle an earlier start_game reply gave) that game from an earlier connection. A game lasts ${leaseMin} min and ends after ${idleMin} min without calls. When every bot is in use, the reply gives your place in the queue and an estimate. Returns the skills, the state and a handle to resume the game. Call this first.`,
       inputSchema: {
         adult: z.boolean().optional().describe('not needed (accepted from older prompts and ignored)'),
+        live: z.boolean().optional().describe('default true: your user watches, and play waits for live_view. false only when your user said they do not want to watch'),
+        rules: z.object({ defend: z.boolean().optional(), flee: z.boolean().optional(), escape: z.boolean().optional(), eat_below: z.number().int().min(0).max(20).optional() }).optional()
+          .describe('your rules: what the body does by itself, without a call (none at the start); also the policy skill at any time'),
         game: z.string().max(64).optional().describe('the handle of a game to resume (from an earlier start_game reply)'),
         goal: z.string().max(120).optional().describe(`what to play for: ${GOAL_NAMES.join(', ')} (default free), or your user's words ("kill 100 pigs"); the reply gives the plan`),
       },
-    }, async ({ game: handle, goal: goalRaw }, extra) => {
+    }, async ({ game: handle, goal: goalRaw, live, rules: rulesArg }, extra) => {
       let s = game(entry);
       let resumed = Boolean(s);
       if (handle && handle !== entry.handle) {
@@ -895,8 +1044,8 @@ export function createMcp(hooks) {
       }
       if (!s) {
         try {
-          s = hooks.newSession(null, { key: entry.key, address: entry.address });
-        } catch (e) { return fail(`could not start: ${e.message}`); }
+          s = hooks.newSession(null, { key: entry.key, address: entry.address, owner: Boolean(entry.owner) });
+        } catch (e) { return startRefused(e); }
         forget(null);
         entry.token = s.token;
         hooks.log.event('mcp_game', { session: sid8(), game: s.id, client: entry.client ?? null });
@@ -921,8 +1070,19 @@ export function createMcp(hooks) {
         // the kills of the body's reflexes (a zombie the defend reflex killed counts for "kill 10 zombies")
         safely(() => s.body?.on?.('kill', (k) => safely(() => tracker.onKills(k?.mobs, k?.by ?? 'reflex'))));
       } else if (goalRaw) s.tracker.setGoal(readGoal(goalRaw, s), 'start_game');
+      // The agent's rules, given with start_game (the body acts by itself by these only; none at the start)
+      s.callNo = s.callNo ?? 1;
+      // set by start_game itself (not a play call: the HUD numbers play calls), at the time it was sent
+      if (rulesArg && typeof s.body?.setRules === 'function') safely(() => s.body.setRules(rulesArg, { call: null, via: 'start_game', at: Date.now() }));
+      // live: false only when the user does not want to watch (the default: they do, and play waits for live_view)
+      if (live === false) s.liveOff = true;
+      else if (live === true) s.liveOff = false;
       const plan = planText(s.tracker.goal, { lex, leaseMin });
-      return text(`${resumed ? `Resumed game ${s.id}` : `New game ${s.id}: a new bot at a fresh spot with an empty inventory`}.\n${plan}\nTo resume this game from a new connection, call start_game with game: "${entry.handle}".\n${s.status === 'ready' ? '' : 'The bot is still joining the world: call get_state in a few seconds (it waits for the bot).\n'}\nSkills (use play or play_sequence; a skill's arguments go in args):\n${SKILLS}\n\n${stateBlock(s)}${s.liveViewed || !LIVE_NEXT_TEXT ? '' : `\n\n${LIVE_NEXT_TEXT}`}`);
+      // the rules: what is set, what each does, the trade-off, and to decide now 
+      const ri = safely(() => s.body?.rules?.() ?? null);
+      const anyRule = ri && Object.values(ri.rules ?? {}).some((v) => v === true || v > 0);
+      const rulesText = ri ? `\nYour rules (the body does nothing by itself but these; ${anyRule ? 'as set' : 'none set yet'}): ${describeRules(ri.rules)}. A rule acts within a second; your calls take seconds to minutes, and a zombie hits in one second: without defend and escape the bot dies more. Decide now: start_game with rules {defend, flee, escape, eat_below}, or the policy skill at any time (e.g. policy {"defend": "on", "escape": "on", "eat_below": 6}). What a rule does counts as decided by you.` : '';
+      return text(`${s.liveViewed || s.liveOff || !LIVE_NEXT_TEXT ? '' : `${LIVE_NEXT_TEXT}\n\n`}${resumed ? `Resumed game ${s.id}` : `New game ${s.id}: a new bot at a fresh spot with an empty inventory`}.\n${plan}${rulesText}\nTo resume this game from a new connection, call start_game with game: "${entry.handle}".\n${s.status === 'ready' ? '' : 'The bot is still joining the world: call get_state in a few seconds (it waits for the bot).\n'}\nSkills (use play or play_sequence; a skill's arguments go in args):\n${SKILLS}\n\n${stateBlock(s)}`);
     });
 
     server.registerTool('play', {
@@ -963,6 +1123,7 @@ export function createMcp(hooks) {
         await wait(q.idle(), end - Date.now(), signal);
         if (q.busy) lead = `${describe(q.running ?? q.waiting[0])} is still running${q.waiting.length ? ` (${q.waiting.length} more queued)` : ''}; call get_state again to keep waiting, or stop.\n`;
       }
+      await stuckCheck(s, []);
       const more = full ? { full: safely(() => s.body.snapshot(), null) } : {};
       return reply(s, extra, { lead, more, withAttribution: true });
     });
@@ -978,14 +1139,15 @@ export function createMcp(hooks) {
       const { running, cancelled } = q.stop('stop cleared the queue');
       const was = await hooks.stopSession(s, 'stopped through MCP');
       if (running) await wait(running.done, 3_000, signalOf(extra));
-      const what = `${was || running ? 'Stopped.' : 'Nothing was running.'}${cancelled.length ? ` ${cancelled.length} queued step${cancelled.length > 1 ? 's were' : ' was'} cancelled.` : ''}\n`;
-      return reply(s, extra, { lead: what, code: was || running || cancelled.length ? 'STOPPED' : null });
+      const ended = q.finished?.([])?.length ? ' (the last step had already ended: its result is below)' : '';
+      const what = `${was || running ? 'Stopped.' : `Nothing was running${ended}.`}${cancelled.length ? ` ${cancelled.length} queued step${cancelled.length > 1 ? 's were' : ' was'} cancelled.` : ''}\n`;
+      return reply(s, extra, { lead: what, code: was || running || cancelled.length ? 'STOPPED' : false });
     });
 
     const LIVE_VIEW_TEXT = liveMode === 'local'
-      ? 'Read-only for the game. Points this server\'s one camera at your game and returns the link of its watch page: the game and its HUD in a browser, a few seconds behind (your user opens the link; a preview panel cannot play it). The camera films the game whose live_view call came last. While the camera starts, the call waits up to about 40 s. format "html" (default): also a small web page with the link and the camera\'s state; "link": JSON with the watch page link; "embed": JSON with the state.'
+      ? 'Read-only for the game. Points this server\'s one camera at your game and returns the link of its watch page: the game and its HUD in a browser, a few seconds behind (your user opens the link; a preview panel cannot play it). The server has one camera, first come, first served: it stays on a game until that game ends, and a game that calls live_view while another has it is put in line (the reply says its place; the game itself runs normally). While the camera starts, the call waits up to about 40 s. format "html" (default): also a small web page with the link and the camera\'s state; "link": JSON with the watch page link; "embed": JSON with the state.'
       : liveMode === 'facebook'
-        ? 'Read-only for the game. format "html" (default): a web page of about 2 KB that shows this game\'s live video (Facebook\'s video player, starting muted, a status line and a few lines of script that reload the player; no request of its own; it can be shown as a web artifact), and a plain link. The server has one camera: it films the game whose live_view call came last. While the video starts, the call waits up to about 40 s. "link": JSON with the video link. "embed": JSON with the player URL.'
+        ? 'Read-only for the game. format "html" (default): a web page of about 2 KB that shows this game\'s live video (Facebook\'s video player, starting muted, a status line and a few lines of script that reload the player; no request of its own; it can be shown as a web artifact), and a plain link. The server has one camera, first come, first served: it stays on a game until that game ends, and a game that calls live_view while another has it is put in line (the reply says its place; the game itself runs normally). While the video starts, the call waits up to about 40 s. "link": JSON with the video link. "embed": JSON with the player URL.'
         : 'Read-only. The live view is off on this server: the reply says so (and gives 3D views of the bot when the server has them).';
     server.registerTool('live_view', {
       description: LIVE_VIEW_TEXT,
@@ -1007,50 +1169,57 @@ export function createMcp(hooks) {
       // a test caller (the check scripts) never spends a Facebook live (MCP_TEST_LIVE on lets it): the same shape of
       // answer, and the camera stays where it is. The local watch page costs nothing but CPU: tests may use it.
       if (liveMode === 'facebook' && s.caller === 'TEST SCRIPT' && !hooks.testLives) {
-        safely(() => hooks.log.event('live_view_test', { session: sid8(), game: s.id, caller: s.caller, format }));
-        if (format !== 'html') return text(JSON.stringify({ format, game: s.id, live: false, state: 'test', camera_game: null, player: null, embed_url: null, video_url: null, ...views }));
+        safely(() => hooks.log.event('live_view_test', { session: sid8(), game: s.id, caller: s.caller, format, record: Boolean(hooks.testRecord) }));
+        // MCP_TEST_RECORD: the camera films it for the recording only (how the recording is tested; no live video), in
+        // line behind the game that has the camera
+        const tv = hooks.testRecord ? await Promise.resolve(hooks.liveView?.(s, { waitMs: 0, local: true })).catch(() => null) : null;
+        const tq = tv?.state === 'queued' ? tv.queue : null;
+        if (format !== 'html') return text(JSON.stringify({ format, game: s.id, live: false, state: 'test', camera_game: null, player: null, embed_url: null, video_url: null, ...views, ...(tq ? { queue: tq } : {}) }));
         const html = liveViewHtml({ state: 'test', game: s.id, fb: false });
         const lines = [`Live view of game ${s.id}: test caller: no Facebook live (the live videos a day are few and kept for players). The game itself works.`,
+          ...(tq ? [queuedText(s.id, tq)] : []),
           ...viewLines, '', 'HTML page (a status line):', html];
         return { content: [{ type: 'text', text: lines.join('\n') }], structuredContent: { format: 'html', game: s.id, state: 'test', live: false, camera_game: null, video_url: null, embed_url: null, html } };
       }
       // the camera is pointed at this game and the call waits for the channel to show it
       const budget = Math.max(0, waitMs - 3_000);
       const asked = Date.now();
-      const v = (await hooks.liveView(s, { waitMs: budget, signal: signalOf(extra) })) ?? { fb: false, state: 'unreachable' };
+      const v = (await hooks.liveView(s, { waitMs: budget, signal: signalOf(extra), owner: Boolean(entry.owner) })) ?? { fb: false, state: 'unreachable' };
       const camera = v.camera ?? null;
       const live = v.state === 'live' && (camera === null || camera === s.id);
       if (liveMode === 'local') {
         const watchUrl = l.live;
-        if (format === 'link' || format === 'embed') return text(JSON.stringify({ format, game: s.id, live, state: v.state, camera_game: camera, watch_url: watchUrl, ...views }));
-        const html = localViewHtml({ state: v.state, game: s.id, camera, watchUrl });
+        if (format === 'link' || format === 'embed') return text(JSON.stringify({ format, game: s.id, live, state: v.state, camera_game: camera, watch_url: watchUrl, ...views, ...(v.queue ? { queue: v.queue } : {}) }));
+        const html = localViewHtml({ state: v.state, game: s.id, camera, watchUrl, queue: v.queue });
         const lines = [];
         const since = v.liveSince ? ` since ${String(v.liveSince).slice(11, 19)} UTC` : '';
         if (live) lines.push(`Live view of game ${s.id}: live${since}. Watch it in a browser (about 5 to 8 s behind): ${watchUrl}`);
-        else if (v.state === 'live') lines.push(`Live view: the camera is on game ${camera} now, not on ${s.id}: that game asked for the live view after this one. A new live_view call points the camera back at ${s.id}. Watch page: ${watchUrl}`);
+        else if (v.state === 'queued') lines.push(`${queuedText(s.id, v.queue)} Watch page (it shows your game once the camera is on it): ${watchUrl}`);
+        else if (v.state === 'live') lines.push(`Live view: the camera is on game ${camera} now, not on ${s.id}; ${s.id} is in line for it. Call live_view again later. Watch page: ${watchUrl}`);
         else if (v.state === 'retrying') lines.push(`Live view of game ${s.id}: not live: the camera could not start${v.error ? ` (${String(v.error).slice(0, 200)})` : ''}. It tries again by itself${v.retryInS ? ` in ${v.retryInS} s` : ''}. Watch page: ${watchUrl}`);
         else if (v.state === 'unreachable') lines.push(`Live view of game ${s.id}: ${downWords(v)} The game itself works. Watch page, once the camera runs: ${watchUrl}`);
         else lines.push(`Live view of game ${s.id}: the camera is starting (${Math.round((Date.now() - asked) / 1000)} s so far; the first picture takes 10 to 40 s). The watch page shows the game as soon as it is there: ${watchUrl}`);
-        lines.push('Give your user the watch page link: it opens in a browser (a preview panel cannot play it). One camera serves every game on this server: it films the game whose live_view call came last.');
+        lines.push('Give your user the watch page link: it opens in a browser (a preview panel cannot play it). One camera serves every game on this server, first come, first served: it stays on a game until that game ends (or makes no call for 5 minutes while others wait), then moves to the next game in line.');
         lines.push(...viewLines, '', 'HTML page (the link and a status line):', html);
         return {
           content: [{ type: 'text', text: lines.join('\n') }],
-          structuredContent: { format: 'html', game: s.id, state: v.state, live, camera_game: camera, watch_url: watchUrl, video_url: null, embed_url: null, html },
+          structuredContent: { format: 'html', game: s.id, state: v.state, live, camera_game: camera, watch_url: watchUrl, video_url: null, embed_url: null, ...(v.queue ? { queue: v.queue } : {}), html },
         };
       }
       const embedUrl = v.embedUrl ?? null;
       const videoUrl = v.videoUrl ?? null;
       if (format === 'embed' || format === 'link') {
-        return text(JSON.stringify({ format, game: s.id, live, state: v.state, camera_game: camera, player: embedUrl ? 'facebook' : null, embed_url: embedUrl, video_url: videoUrl, ...views }));
+        return text(JSON.stringify({ format, game: s.id, live, state: v.state, camera_game: camera, player: embedUrl ? 'facebook' : null, embed_url: embedUrl, video_url: videoUrl, ...views, ...(v.queue ? { queue: v.queue } : {}) }));
       }
       // at the cap: until when, in UTC (the game is not affected)
       const capUntil = v.state === 'capped' && Number.isFinite(v.retryInS) ? new Date(Date.now() + v.retryInS * 1000).toISOString().slice(11, 16) : null;
       const daily = /24 hours|day/.test(String(v.error ?? ''));
-      const html = liveViewHtml({ state: v.state, game: s.id, camera, embedUrl, fb: true, ownerOnly: Boolean(v.warning), aspect: v.aspect, until: capUntil, daily });
+      const html = liveViewHtml({ state: v.state, game: s.id, camera, embedUrl, fb: true, ownerOnly: Boolean(v.warning), aspect: v.aspect, until: capUntil, daily, statusBase: entry.base, statusId: s.viewId, logo: hooks.posterLogo || false, name: hooks.serverName ?? '', queue: v.queue, fbOwner: v.owner });
       const lines = [];
       const since = v.liveSince ? ` since ${String(v.liveSince).slice(11, 19)} UTC` : '';
       if (live) lines.push(`Live view of game ${s.id}: live on Facebook${since}.`);
-      else if (v.state === 'live') lines.push(`Live view: the camera is on game ${camera} now, not on ${s.id}: that game asked for the live view after this one. A new live_view call points the camera back at ${s.id}.`);
+      else if (v.state === 'queued') lines.push(queuedText(s.id, v.queue));
+      else if (v.state === 'live') lines.push(`Live view: the camera is on game ${camera} now, not on ${s.id}; ${s.id} is in line for it. Call live_view again later.`);
       else if (v.state === 'capped') {
         const mins = Math.max(1, Math.ceil((v.retryInS ?? 60) / 60));
         const inWords = mins < 90 ? `${mins} min` : `${Math.floor(mins / 60)} h ${mins % 60} min`;
@@ -1067,11 +1236,11 @@ export function createMcp(hooks) {
       if (videoUrl) lines.push(`Video (plain link): ${videoUrl}`);
       else lines.push(...viewLines);
       if (v.warning) lines.push(`Warning: ${v.warning}`);
-      lines.push('One camera serves every game on this server: it films the game whose live_view call came last, so if another game calls live_view, this video shows that game until live_view is called again here. When no game is left the live video ends; the next game gets a new one.');
+      lines.push('One camera serves every game on this server, first come, first served: it stays on a game until that game ends (or makes no call for 5 minutes while others wait), then moves to the next game in line, which gets a live video of its own.');
       lines.push('', 'HTML page (Facebook\'s video player and a status line; a small script reloads the player, no request of its own):', html);
       return {
         content: [{ type: 'text', text: lines.join('\n') }],
-        structuredContent: { format: 'html', game: s.id, state: v.state, live, camera_game: camera, video_url: videoUrl, embed_url: embedUrl, ...(v.warning ? { warning: v.warning } : {}), html },
+        structuredContent: { format: 'html', game: s.id, state: v.state, live, camera_game: camera, video_url: videoUrl, embed_url: embedUrl, ...(v.queue ? { queue: v.queue } : {}), ...(v.warning ? { warning: v.warning } : {}), html },
       };
     });
 
@@ -1088,7 +1257,7 @@ export function createMcp(hooks) {
       forget('you ended it with end_game');
       const out = text(`Game ended.${report ? `\n\n${report.text}\n\n` : attribution ? ` ${attribution.text}. ` : ' '}start_game gives you a new bot.`);
       const sc = {
-        ...(attribution ? { attribution: { agent: attribution.agent, reflex: attribution.reflex, care: attribution.care, agentPct: attribution.agentPct } } : {}),
+        ...(attribution ? { attribution: { agent: attribution.agent, reflex: attribution.reflex, care: attribution.care, agentPct: attribution.agentPct, ...(attribution.rule != null ? { rule: attribution.rule, body: attribution.body, decidedPct: attribution.decidedPct } : {}) } } : {}),
         ...(report ? { report: report.data } : {}),
       };
       return Object.keys(sc).length ? { ...out, structuredContent: sc } : out;
@@ -1136,6 +1305,28 @@ export function createMcp(hooks) {
         argsSchema: { goal: z.string().max(120).optional().describe(`what to play for: ${GOAL_NAMES.join(', ')}, or a short text`) },
       }, ({ goal } = {}) => ({ messages: [{ role: 'user', content: { type: 'text', text: promptText(goal || 'free') } }] }));
     }
+    // what the client reads of this server (real game g71c9f5, 2026-10-13: the agent sent no why or plan and asked for
+    // the age as if its tool list were days old; whether it reads tools/list each session was in no log): each list
+    // request, once per MCP session per kind
+    for (const method of ['tools/list', 'prompts/list']) {
+      const h = low._requestHandlers?.get?.(method);
+      if (typeof h !== 'function') continue;
+      low._requestHandlers.set(method, async (...a) => {
+        const out = await h(...a);
+        safely(() => hooks.log.event('mcp_list', { session: sid8(), method, count: (out?.tools ?? out?.prompts ?? []).length, game: safely(() => game(entry)?.id, null) ?? null }));
+        return out;
+      });
+    }
+    // a client that kept an old tool list: told the list changed once it is initialized (it may read it again; a
+    // client without a stream open for it just does not hear it)
+    low.oninitialized = () => {
+      // a moment later: a client opens its stream for server messages after initializing
+      const t = setTimeout(() => safely(() => {
+        server.sendToolListChanged?.();
+        hooks.log.event('mcp_list_changed', { session: sid8() });
+      }), 1_000);
+      t.unref?.();
+    };
     return server;
   }
 
@@ -1154,7 +1345,8 @@ export function createMcp(hooks) {
   }
 
   /** May this address open one more MCP session? null, or {status, message, headers}. */
-  function admit(address) {
+  function admit(address, owner = false) {
+    if (!owner && safely(() => hooks.banned?.(address), false)) return { status: 403, message: 'this address may not play on this server' };
     const limit = hooks.initLimiter?.take(address) ?? { ok: true };
     if (!limit.ok) return { status: 429, message: `too many new MCP sessions from your address; try again in ${roughly(limit.retryMs)}`, headers: { 'retry-after': String(Math.ceil(limit.retryMs / 1000)) } };
     const mine = [...sessions].filter(([, e]) => e.address === address);
@@ -1193,12 +1385,14 @@ export function createMcp(hooks) {
         req.resume();
         res.writeHead(status, { 'content-type': 'application/json', ...headers }).end(JSON.stringify({ jsonrpc: '2.0', error: { code: status === 404 ? -32001 : -32000, message }, id: null }));
       };
-      if (id) { reply(404, 'unknown session; initialize again'); return; }
+      // refusals before a session, in the log too (g71c9f5: two get_state calls the agent saw fail are in no log of ours)
+      if (id) { hooks.log.event('mcp_http', { status: 404, session: String(id).slice(0, 8), method: req.method, why: 'unknown session' }); reply(404, 'unknown session; initialize again'); return; }
       const address = hooks.clientKey(req);
-      const refused = admit(address);
-      if (refused) { reply(refused.status, refused.message, refused.headers); return; }
-      // only what the session needs later: never the request itself
-      entry = { address, base: hooks.base(req), token: null, handle: null, client: null, endedWhy: null, lastCall: now() };
+      const ownerHere = Boolean(safely(() => hooks.isOwner?.(req), false));
+      const refused = admit(address, ownerHere);
+      if (refused) { hooks.log.event('mcp_http', { status: refused.status, method: req.method, why: clean(refused.message, 120) }); reply(refused.status, refused.message, refused.headers); return; }
+      // only what the session needs later: never the request itself (the owner's key is checked, never kept)
+      entry = { address, base: hooks.base(req), token: null, handle: null, client: null, endedWhy: null, lastCall: now(), owner: ownerHere, hits: [] };
       entry.key = `mcp:${crypto.randomUUID()}`; // the key the game counts under: mcp:<MCP session id> once there is one
       entry.transport = new StreamableHTTPServerTransport({
         sessionIdGenerator: () => crypto.randomUUID(),
@@ -1216,7 +1410,22 @@ export function createMcp(hooks) {
       };
       await build(entry).connect(entry.transport);
     }
+    // a session's requests, at most limits.perMinute a minute (a caller looping on get_state or tools/list)
+    {
+      const t = now();
+      entry.hits = (entry.hits ?? []).filter((x) => x > t - 60_000);
+      if (!entry.owner && entry.hits.length >= limits.perMinute) {
+        const retry = Math.max(1, Math.ceil((entry.hits[0] + 60_000 - t) / 1000));
+        if (!entry.slowTold || t - entry.slowTold > 60_000) { entry.slowTold = t; hooks.log.event('mcp_http', { status: 429, session: String(entry.transport?.sessionId ?? '').slice(0, 8), method: req.method, why: 'requests per minute' }); }
+        req.resume();
+        res.writeHead(429, { 'content-type': 'application/json', 'retry-after': String(retry) }).end(JSON.stringify({ jsonrpc: '2.0', error: { code: -32000, message: `too many requests on this MCP session (at most ${limits.perMinute} a minute); slow down and send it again in ${retry} s` }, id: null }));
+        return;
+      }
+      entry.hits.push(t);
+    }
     entry.lastCall = now();
+    // the owner's connection (MCP_OWNER_KEY, ?owner= or X-Owner-Key): its games are first in line for the camera
+    if (!entry.owner && safely(() => hooks.isOwner?.(req), false)) entry.owner = true;
     // be lenient with hand-written clients: a POST that forgot the Accept types the spec asks for gets them added
     // (the SDK would answer 406, which some clients get otherwise)
     if (req.method === 'POST') {

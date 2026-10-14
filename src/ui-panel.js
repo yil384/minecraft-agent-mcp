@@ -1,4 +1,7 @@
-// src/ui-panel.js - the HUD in the live video (STREAM_LAYOUT=ui, the camera's side): the stats strip, the goal band, the agent's why
+// src/ui-panel.js - the HUD in the live video (STREAM_LAYOUT=ui, the camera's side). Two designs draw it: concept B
+// "Speedrun broadcast" (o.design 'b', the default: src/hud-b.js, over the whole frame: toasts, floaters, banners and
+// the action bar over the video, the broadcast package under it), and the design before it (o.design 'final',
+// STREAM_HUD=final): the stats strip, the goal band, the agent's why
 // and plan (or one honest line when it sent none), NOW (the call running, its steps as the agent sent them, the body carrying
 // them out) beside the body's advice and the BODY · WORLD events, and RAW across the bottom (every call as sent, newest
 // first, with the server's answer); the inventory hotbar and the toasts over the video's bottom corners.
@@ -18,6 +21,7 @@ import path from 'node:path';
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import { drawHud, hudSig, ICON_SIZES } from './hud.js';
+import { createHudB } from './hud-b.js';
 
 const require = createRequire(import.meta.url);
 
@@ -79,7 +83,7 @@ const reflexGist = (text) => String(text ?? '').replace(/^(?:reflex|body|Reflex|
  * there"; two actions with the same reason never read the same.
  */
 export function actionGist(text) {
-  const t = String(text ?? '').replace(/^(?:reflex|body|Reflex|Body):\s*/, '').trim();
+  const t = String(text ?? '').replace(/^(?:reflex|body|Reflex|Body|rule [a-z_]+):\s*/, '').trim();
   const m = /^([^:]{12,}?):\s+(.+)$/.exec(t);
   if (!m || m[1].split(/\s+/).length <= 3) return reflexGist(t);
   return m[2].split(/;| then /)[0].trim();
@@ -158,6 +162,9 @@ const resultWords = (t) => String(t ?? '').replace(/^ok\s+/, '').replace(/\s*\(\
  * @param {string} [o.assets]         icons and fonts (assets/ui)
  * @param {() => number} [o.now]
  * @param {boolean} [o.qa]            outline every text problem in red (the mock-up's ?qa=1)
+ * @param {'b'|'final'} [o.design]    the HUD's design: B (the default; o.over must be the video's height, 608 at 1080)
+ * @param {{style: 'card'|'plain', file?: string}} [o.logo]  B: a logo at the top right (none without it)
+ * @param {(ev: object) => void} [o.onEvent]  B's toasts, banners, floaters, action-bar lines as scheduled (the recording)
  */
 export function createUiPanel(o) {
   const { createCanvas, Image, registerFont } = require('canvas');
@@ -178,6 +185,15 @@ export function createUiPanel(o) {
   // icons, each scaled once to every size the HUD draws it at
   const images = {};
   try { for (const f of fs.readdirSync(path.join(assets, 'icons'))) if (f.endsWith('.png')) { const im = new Image(); im.src = fs.readFileSync(path.join(assets, 'icons', f)); images[f.slice(0, -4)] = im; } } catch { /* drawn without */ }
+  // a logo for the top right of the video (concept B; the stream only, never the clean recording; STREAM_LOGO, off
+  // by default): o.logo {style: card | plain, file: a name in assets/ui, a path under assets/ or an absolute path};
+  // none without it. Without a file: the project's pixel logo (assets/brand/picasso-lab-pixel-230.png, NOTICE)
+  let logo = null;
+  if (o.logo && ['card', 'plain'].includes(o.logo.style)) {
+    const name = o.logo.file || 'brand/picasso-lab-pixel-230.png';
+    const f = path.isAbsolute(name) ? name : name.includes('/') ? path.join(assets, '..', path.normalize(name).replace(/^(\.\.[/\\])+/, '')) : path.join(assets, name);
+    try { const im = new Image(); im.src = fs.readFileSync(f); logo = { img: im, style: o.logo.style }; } catch { logo = null; }
+  }
   const scaled = new Map();
   const iconAt = (n, size) => {
     const k = `${n}@${size}`;
@@ -196,7 +212,7 @@ export function createUiPanel(o) {
   const top = VIDEO_H - T; // the panel's first row in the frame
 
   // ----- what is shown
-  const st = { hp: null, food: null, clock: '', agent: null, reflex: null, pct: null };
+  const st = { hp: null, food: null, clock: '', agent: null, reflex: null, pct: null, rule: null, body: null, dpct: null };
   let calls = []; // newest first: {tool, say, words, plan, raw, rid, reply, replyGs, replyCode, at, gs, no, steps, added, state, msSum, checked}
   let events = []; // the body's own: {kind: reflex|body|death, text, at, gs}
   let world = []; // from the body's state: {kind: 'world', who, text, at, gs}
@@ -207,6 +223,8 @@ export function createUiPanel(o) {
   let follow = null; // {text, ok, at, gs}
   const advice = new Map(); // kind -> {text, gist, sev, at, gs}
   let toast = null; // a milestone: {text, at}
+  let rules = null; // the agent's rules as the server has them: [{n, on, v, setS, call}] (null: a server without them)
+  let rulesToast = null; // the rules changed: {title, at}
   let anchor = null; // the game clock: {ticks, at, rate}
   let game = null; // {id, s, at}
   let goal = null; // the server's: {key, title, text, reached, list}
@@ -231,7 +249,16 @@ export function createUiPanel(o) {
   let unwritten = false; // a drawing not in the panel file yet
   let lastLayout = null;
   let lastQa = null;
-  const perf = { draws: 0, writes: 0, searches: 0, searchBase: 0, ms: [], lag: [], ticks: 0, gapMax: 0, lastTick: null };
+  let callSeq = 0; // every call's id in this panel
+  let playSeq = 0; // the game's play calls, counted here until the server's number is known
+  const perf = { draws: 0, writes: 0, searches: 0, searchBase: 0, ms: [], lag: [], ticks: 0, gapMax: 0, lastTick: null, errors: 0, lastError: null, composes: 0, cms: [] };
+  // concept B: its own layers over the whole frame (the video's place see-through but for what moves over it)
+  const design = o.design ?? 'b';
+  const hb = design === 'b'
+    ? createHudB({ createCanvas, icon: iconAt, has: (n) => Boolean(images[n]), logo, emit: (ev) => { try { o.onEvent?.({ ...ev, gs: gameS(ev.start ?? ev.at ?? now()) }); } catch { /* best effort */ } } })
+    : null;
+  let bSec = null;
+  let bEpoch = '';
   function bump() { version += 1; if (changedAt === null) changedAt = now(); }
 
   const gameS = (t = now()) => (game && Number.isFinite(game.s) ? game.s + (t - game.at) / 1000 : null);
@@ -283,6 +310,7 @@ export function createUiPanel(o) {
       steps: steps.map((x) => ({ say: x.say || x.raw, raw: x.raw || '', skill: x.skill || String(x.raw || '').split(' ')[0], args: parseArgs(x.args), state: 'queued', ms: 0 })),
       replyGs: null, replyCode: null, added: [],
       state: PLAY.test(tool) ? { kind: 'run' } : { kind: 'ok' }, msSum: 0, checked: null, goal: ready && goal ? goal.title : null,
+      id: ++callSeq, seqNo: PLAY.test(tool) ? ++playSeq : null,
     };
     calls.unshift(cmd);
     calls = calls.slice(0, 120);
@@ -364,9 +392,19 @@ export function createUiPanel(o) {
         if (state === 'next' && m.k === 'obsidian' && inv) progress = `${Math.min(inv.obsidian ?? 0, 14)}/14`;
         if (state === 'next' && m.k === 'diamond' && inv && (inv.diamond ?? 0) > 0) progress = `${inv.diamond}/3`;
         const icon = GOAL_ICONS[m.k] ?? (images[m.k] ? m.k : partIcon(m.k));
-        return { key: m.k, label: GOAL_WORDS[m.k] ?? capital(m.t), icon: iconOf(icon, 'star'), state, done: m.atS != null ? mmss(m.atS) : null, ...(progress ? { progress } : {}) };
+        return { key: m.k, label: GOAL_WORDS[m.k] ?? capital(m.t), icon: iconOf(icon, 'star'), state, done: m.atS != null ? mmss(m.atS) : null, doneS: m.atS ?? null, ...(progress ? { progress } : {}) };
       }),
     };
+  }
+  // The agent's rules in words: "defend, eat at food 4 or less"; none on: ''
+  const RULE_WORDS = { defend: 'defend', flee: 'flee', escape: 'escape' };
+  const ruleWord = (r) => (r.n === 'eat_below' ? `eat at food ${r.v ?? '?'} or less` : RULE_WORDS[r.n] ?? r.n);
+  const rulesWords = (rs) => { const on = (rs ?? []).filter((r) => r.on); return on.length ? on.map(ruleWord).join(', ') : 'none: every action a direct call'; };
+  function rulesState() {
+    const on = rules.filter((r) => r.on);
+    // the newest change: when and with which call
+    const last = rules.filter((r) => Number.isFinite(r.setS)).sort((a, z) => z.setS - a.setS)[0] ?? null;
+    return { on: on.map((r) => ({ n: r.n, words: ruleWord(r), ...(Number.isFinite(r.v) ? { v: r.v } : {}) })), set: last ? clockOf(last.setS) : null, call: last?.call ?? null, ...(last?.via ? { via: last.via } : {}) };
   }
   function hudState(t) {
     const gs = gameS(t) ?? 0;
@@ -383,8 +421,10 @@ export function createUiPanel(o) {
       hp: Number.isFinite(st.hp) ? st.hp : '–', hpMax: 20, food: Number.isFinite(st.food) ? st.food : '–', foodMax: 20,
       dimension: nether ? 'nether' : st.clock === 'END' ? 'end' : 'overworld', phase: night ? 'night' : nether ? 'nether' : 'day', phaseWords,
       timeOfDay: clk && !nether && st.clock !== 'END' ? clk.replace(/^(?:DAY|NIGHT) /, '') : '',
-      agentShare: { pct, ...(Number.isFinite(st.agent) && Number.isFinite(st.reflex) && st.agent + st.reflex > 0 ? { agent: st.agent, reflex: st.reflex } : { agent: null, reflex: null }) },
-      gameId: game?.id ?? '', gameClock: mmss(gs),
+      agentShare: { pct, ...(Number.isFinite(st.agent) && Number.isFinite(st.reflex) && st.agent + st.reflex > 0 ? { agent: st.agent, reflex: st.reflex } : { agent: null, reflex: null }),
+        // The agent's rules (servers that count them): actions by its rules, by the body on its own, decided by the agent %
+        ...(Number.isFinite(st.rule) ? { rule: st.rule, body: st.body ?? 0, dpct: Number.isFinite(st.dpct) ? st.dpct : null } : {}) },
+      gameId: game?.id ?? '', gameClock: mmss(gs), ticks: nether || st.clock === 'END' ? null : tk,
     };
     // the inventory hotbar: the items that matter, in this order
     const iv = inv ?? {};
@@ -413,7 +453,7 @@ export function createUiPanel(o) {
       const states = stepStates(latest);
       const runningNow = latest.state?.kind === 'run';
       currentCall = {
-        no: latest.no ?? '?', tool: latest.tool, sent: clockOf(latest.gs), state: runningNow ? 'running' : latest.state?.kind === 'ok' ? 'ok' : 'fail',
+        id: latest.id, sentS: latest.gs, no: latest.no ?? '?', tool: latest.tool, sent: clockOf(latest.gs), state: runningNow ? 'running' : latest.state?.kind === 'ok' ? 'ok' : 'fail',
         running: mmss((t - latest.at) / 1000), doneIn: latest.msSum > 0 ? secs(latest.msSum) : '',
         steps: latest.steps.map((x, i) => {
           const k = states[i] === 'skip' ? 'queued' : states[i];
@@ -434,8 +474,13 @@ export function createUiPanel(o) {
       const waiting = !c.reply && !PLAY.test(c.tool) && c.tool !== 'start_game';
       return {
         n: calls.length - idx, tool: c.tool, args: c.raw || '{}', sentS: c.gs, sent: clockOf(c.gs), agoS: (t - c.at) / 1000, playCallNo: PLAY.test(c.tool) ? (c.no ?? '?') : null, hasWhy: Boolean(c.words),
-        answer: { state: isRun ? 'running' : waiting ? 'waiting' : 'answered', waitingS: waiting ? (t - c.at) / 1000 : null, hudText: isRun ? `running ${mmss((t - c.at) / 1000)}` : null, code: c.replyCode ?? null },
+        answer: { state: isRun ? 'running' : waiting ? 'waiting' : 'answered', waitingS: waiting ? (t - c.at) / 1000 : null, hudText: isRun ? `running ${mmss((t - c.at) / 1000)}` : null, code: c.replyCode ?? null,
+          atS: c.replyGs ?? null, text: c.reply ? c.reply.replace(/^<\s*/, '') : '' },
         reply: c.reply ? c.reply.replace(/^<\s*/, '') : null, replyAt: clockOf(c.replyGs),
+        // what concept B reads: the call's id here, its steps as objects, the why and plan, its state, its time
+        id: c.id, callNo: PLAY.test(c.tool) ? (c.no ?? c.seqNo) : null, why: c.words || null, plan: c.plan || null, state: c.state?.kind ?? 'ok', ms: c.msSum || 0,
+        steps: c.steps.map((x) => ({ skill: x.skill, args: x.args ?? {}, say: x.say, state: x.state, ...(x.result ? { result: x.result } : {}), ...(x.why ? { why: x.why } : {}) })),
+        ...(c.tool === 'set_goal' ? { goal: (parseArgs(c.raw)?.goal ?? String(c.say || '').replace(/^A new goal:\s*/, '')) || null } : {}),
       };
     });
     const runs = [];
@@ -449,28 +494,78 @@ export function createUiPanel(o) {
       runs.push({ tool: e.tool, args: e.args, count: 1, lastSent: e.sent, lastAgoS: e.agoS, firstSent: e.sent, ns: [e.n], newestState: e.answer.state, latestAnswer: e.reply, latestAnswerAt: e.replyAt });
     }
     // the advice: full text, when it was given, the verdict tied to it by time
-    const items = [...advice.values()].sort((a, z) => z.sev - a.sev || z.at - a.at).map((a) => {
-      const text = capital(a.text);
-      const lead = text.split(/[:;]\s/)[0]; // its first clause: "Night in about 68 s", "You carry 8 obsidian"
-      return { text, gist: lead.length <= 48 && lead !== text ? lead : '', givenAt: clockOf(a.gs), givenAtS: a.gs ?? 0 };
+    // stuck first (the line that helps most when the agent repeats itself), then by how pressing, the time left last
+    const rank = (a) => (a.kind === 'stuck' ? 0 : a.kind === 'time' ? 2 : 1);
+    const items = [...advice.values()].sort((a, z) => rank(a) - rank(z) || z.sev - a.sev || z.at - a.at).map((a) => {
+      // a stuck advice under its STUCK tag: what is not moving leads ("stuck:" is the tag's)
+      const text = capital(a.kind === 'stuck' ? String(a.text).replace(/^stuck:\s*/i, '') : a.text);
+      const lead = text.split(/[:;]\s|\.\s/)[0]; // its first clause: "Night in about 68 s", "You carry 8 obsidian"
+      return { text, gist: lead.length <= 48 && lead !== text ? lead : '', givenAt: clockOf(a.gs), givenAtS: a.gs ?? 0, ...(a.kind === 'stuck' || a.kind === 'time' ? { kind: a.kind } : {}) };
     });
     const adviceState = { items, follow: null, lastFollow: follow ? { atS: follow.gs ?? 0, at: clockOf(follow.gs), ok: follow.ok } : null };
     // BODY · WORLD: the body's own actions, what happened around it, the server's
     const evs = [
-      ...events.map((e) => ({ at: e.at, gs: e.gs, who: 'body', kind: e.kind, text: e.kind === 'death' ? e.text : e.text })),
+      ...events.map((e) => ({ at: e.at, gs: e.gs, who: e.src === 'rule' ? 'rule' : 'body', kind: e.kind, text: e.text, ...(e.src === 'rule' ? { rule: e.rule, ruleSet: Number.isFinite(e.rs) ? clockOf(e.rs) : null, ruleCall: e.rc ?? null, ruleVia: e.rv ?? null } : {}) })),
       ...world.map((e) => ({ at: e.at, gs: e.gs, who: e.who ?? 'body', kind: e.who === 'server' ? 'policy' : 'world', text: e.text })),
       ...landmarks.map((e) => ({ at: e.at, gs: e.gs, who: 'world', kind: 'milestone', text: e.text })),
-    ].sort((a, z) => z.at - a.at).map((e) => ({ at: clockOf(e.gs), who: e.who, kind: e.kind, text: e.text }));
+    ].sort((a, z) => z.at - a.at).map((e) => ({ at: clockOf(e.gs), atS: Number.isFinite(e.gs) ? e.gs : null, who: e.who, kind: e.kind, text: e.text, ...(e.who === 'rule' ? { rule: e.rule, ruleSet: e.ruleSet, ruleCall: e.ruleCall, ...(e.ruleVia ? { ruleVia: e.ruleVia } : {}) } : {}) }));
     return {
       caller, now: { gameS: gs, gameClock: mmss(gs) }, stats, position: { y: Number.isFinite(pos?.y) ? pos.y : '–', place: pos?.place ?? '' },
       goal: goalState(goalNow(), fresh), inventory, thinking, earlierThinking, currentCall, raw: { total: Math.max(callTotal, calls.length), entries, runs },
-      advice: adviceState, events: evs, toast: toast && t - toast.at < 6_000 ? { label: 'MILESTONE', title: capital(toast.text) } : null,
+      advice: adviceState, events: evs,
+      // the newest of a milestone and a change of the agent's rules, 6 s each
+      toast: [toast && t - toast.at < 6_000 ? { label: 'MILESTONE', title: capital(toast.text), at: toast.at } : null, rulesToast && t - rulesToast.at < 6_000 ? { label: 'RULES CHANGED', title: rulesToast.title, at: rulesToast.at } : null]
+        .filter(Boolean).sort((a, z) => z.at - a.at).map(({ label, title }) => ({ label, title }))[0] ?? null,
+      rules: rules ? rulesState() : null,
       sheltered: sheltered ? { since: clockOf(sheltered.gs) } : null,
+      over: over || null,
     };
   }
 
+  // concept B's frame: the HUD layer when what it shows may have changed (an input, at most every 150 ms; the second,
+  // for its clocks; a toast leaving or reaching its home), then the pieces that move over it, composed when the
+  // picture changed (every frame only while something moves)
+  function renderB(t) {
+    const sec = Math.floor(t / 1000);
+    const ep = hb.epoch(t);
+    const due = sec !== bSec || ep !== bEpoch || (version !== seenVersion && t - lastDrawAt >= MIN_DRAW_GAP_MS);
+    lg.setTransform(s, 0, 0, s, 0, -top * s);
+    if (due) {
+      const content = version !== seenVersion;
+      seenVersion = version; bSec = sec; bEpoch = ep; lastDrawAt = t;
+      const t0 = process.hrtime.bigint();
+      let drew = false;
+      try { drew = hb.update(hudState(t), t, { qa: Boolean(o.qa) }); } catch (e) {
+        perf.errors += 1;
+        perf.lastError = String(e?.stack ?? e?.message ?? e).split('\n').slice(0, 3).join(' | ').slice(0, 300);
+      }
+      bEpoch = hb.epoch(t);
+      if (drew) {
+        const ms = Number(process.hrtime.bigint() - t0) / 1e6;
+        perf.draws += 1;
+        if (perf.ms.length < 4000) perf.ms.push(ms);
+        if (content && changedAt !== null && perf.lag.length < 4000) perf.lag.push(t - changedAt + ms);
+      }
+      if (content) changedAt = null;
+    }
+    const t1 = process.hrtime.bigint();
+    let changed = false;
+    try { changed = hb.compose(lg, t); } catch (e) {
+      perf.errors += 1;
+      perf.lastError = String(e?.stack ?? e?.message ?? e).split('\n').slice(0, 3).join(' | ').slice(0, 300);
+    }
+    lg.setTransform(1, 0, 0, 1, 0, 0);
+    if (changed) {
+      perf.composes += 1;
+      if (perf.cms.length < 4000) perf.cms.push(Number(process.hrtime.bigint() - t1) / 1e6);
+      unwritten = true;
+    }
+    frames += 1;
+    return canvas;
+  }
+
   const api = {
-    width: W, height: H + T, over: T, fps, file: o.file ?? null,
+    width: W, height: H + T, over: T, fps, file: o.file ?? null, design,
     /** New lines from the agent ({k, t, say, words, of, ms, n, why, ak, tool, steps, c, s, pre, pt, pts}). */
     push(lines) {
       bump();
@@ -493,7 +588,8 @@ export function createUiPanel(o) {
           const r = actionGist(l.t);
           const ago = Number.isFinite(l.ago) ? l.ago : 0;
           const gs0 = gameS();
-          if (events[0]?.text !== r) events.unshift({ kind: l.k, text: r, at: now() - ago * 1000, gs: gs0 === null ? null : Math.max(0, gs0 - ago) });
+          const byRule = l.src === 'rule' ? { src: 'rule', rule: l.rule ?? null, rs: Number.isFinite(l.rs) ? l.rs : null, rc: Number.isFinite(l.rc) ? l.rc : null, rv: l.rv ?? null } : {};
+          if (events[0]?.text !== r) events.unshift({ kind: l.k, text: r, at: now() - ago * 1000, gs: gs0 === null ? null : Math.max(0, gs0 - ago), ...byRule });
           events.sort((a, z) => z.at - a.at);
           events = events.slice(0, 12);
         } else if (l.k === 'reply') {
@@ -533,7 +629,7 @@ export function createUiPanel(o) {
         if (anchor && t - anchor.at > 1_500) rate = Math.min(0.03, Math.max(0, ((((data.ticks - anchor.ticks) % 24_000) + 24_000) % 24_000) / (t - anchor.at)));
         anchor = { ticks: data.ticks, at: t, rate };
       }
-      for (const k of ['hp', 'food', 'clock', 'agent', 'reflex', 'pct']) {
+      for (const k of ['hp', 'food', 'clock', 'agent', 'reflex', 'pct', 'rule', 'body', 'dpct']) {
         const v = data[k] ?? null;
         if (v !== null) st[k] = v;
       }
@@ -548,7 +644,7 @@ export function createUiPanel(o) {
         const old = advice.get(k);
         const text = String(a.t).replace(/\s*\(time -?\d+\)/g, ''); // "Night (time 13608): ...": the ticks are for the agent, not the viewers
         const shape = text.replace(/\d+/g, '#'); // the same advice with its numbers moved on keeps the time it was given
-        advice.set(k, { text, gist: adviceGist(text), shape, sev: a.sev ?? 1, at: old?.shape === shape ? old.at : now(), gs: old?.shape === shape ? old.gs : gameS() });
+        advice.set(k, { kind: k, text, gist: adviceGist(text), shape, sev: a.sev ?? 1, at: old?.shape === shape ? old.at : now(), gs: old?.shape === shape ? old.gs : gameS() });
       }
       for (const k of [...advice.keys()]) if (!seen.has(k)) advice.delete(k);
     },
@@ -558,6 +654,12 @@ export function createUiPanel(o) {
     term(u) {
       if (!u) return;
       if (u.game && typeof u.game === 'object') game = { id: u.game.id ?? game?.id ?? '', s: Number.isFinite(u.game.s) ? u.game.s : game?.s, at: now() };
+      if (Array.isArray(u.rules)) {
+        // The agent's rules: a change after the first (start_game's) is a toast
+        const sig = (rs) => JSON.stringify((rs ?? []).filter((r) => r.on).map((r) => [r.n, r.v ?? null]).sort());
+        if (rules && sig(rules) !== sig(u.rules)) rulesToast = { title: rulesWords(u.rules), at: now() };
+        rules = u.rules;
+      }
       if (u.goal && Array.isArray(u.goal.list)) {
         // another goal than the one shown (set_goal): lit for a while, and a toast
         const sig = (x) => (x ? `${x.key}|${x.title}|${x.text ?? ''}` : '');
@@ -599,8 +701,9 @@ export function createUiPanel(o) {
     /** Another game on camera: an empty HUD, with a note. */
     reset(note = '') {
       bump();
-      calls = []; events = []; thoughts = []; world = []; landmarks = []; callTotal = 0; sheltered = null;
-      sub = null; live = null; follow = null; toast = null; anchor = null; game = null; goal = null; prevGoal = null; inv = null; pos = null; over = null; newGoalAt = null;
+      calls = []; events = []; thoughts = []; world = []; landmarks = []; callTotal = 0; sheltered = null; playSeq = 0;
+      hb?.reset();
+      sub = null; live = null; follow = null; toast = null; rules = null; rulesToast = null; anchor = null; game = null; goal = null; prevGoal = null; inv = null; pos = null; over = null; newGoalAt = null;
       caller = 'AGENT';
       advice.clear();
       reachedLocal.clear();
@@ -615,7 +718,8 @@ export function createUiPanel(o) {
      * second went by (its clocks, the progress, the stats), else the last drawing as it is.
      */
     render(t = now()) {
-      const timed = `${Math.floor(t / 1000)}|${newGoalAt !== null && t - newGoalAt < NEW_GOAL_MS}|${toast && t - toast.at < 6_000}`;
+      if (hb) return renderB(t);
+      const timed = `${Math.floor(t / 1000)}|${newGoalAt !== null && t - newGoalAt < NEW_GOAL_MS}|${toast && t - toast.at < 6_000}|${rulesToast && t - rulesToast.at < 6_000}`;
       let state = null, sig = null, content = false;
       let draw = timed !== drawnKey;
       if (!draw && version !== seenVersion && t - lastDrawAt >= MIN_DRAW_GAP_MS) {
@@ -632,7 +736,14 @@ export function createUiPanel(o) {
         lg.setTransform(1, 0, 0, 1, 0, 0);
         lg.clearRect(0, 0, W, H + T);
         lg.setTransform(s, 0, 0, s, 0, -top * s);
-        const r = drawHud(lg, state, { icon: iconAt, qa: Boolean(o.qa) });
+        // a drawing that throws must not freeze the HUD (g0a414c: it stood at 1:29 for the rest of the game); counted
+        // and told in stream_stats
+        let r;
+        try { r = drawHud(lg, state, { icon: iconAt, qa: Boolean(o.qa) }); } catch (e) {
+          perf.errors += 1;
+          perf.lastError = String(e?.stack ?? e?.message ?? e).split('\n').slice(0, 3).join(' | ').slice(0, 300);
+          r = { layout: lastLayout, qa: lastQa, searches: perf.searches };
+        }
         lg.setTransform(1, 0, 0, 1, 0, 0);
         const ms = Number(process.hrtime.bigint() - t0) / 1e6;
         lastLayout = r.layout;
@@ -684,6 +795,8 @@ export function createUiPanel(o) {
     },
     stop() { clearInterval(timer); timer = null; },
     get frames() { return frames; },
+    /** The game's age now in seconds (for the recording's timeline), or null. */
+    get gameS() { return gameS(); },
     /**
      * Since the last call: drawings, files written, layout searches so far, the drawing's time and the lag from an input
      * to its drawing (ms: p50, p99, max), the frame clock's ticks and its longest gap (a busy CPU shows there).
@@ -694,12 +807,13 @@ export function createUiPanel(o) {
         const v = [...a].sort((x, y) => x - y), at = (p) => Math.round(v[Math.min(v.length - 1, Math.floor(p * v.length))] * 10) / 10;
         return { p50: at(0.5), p99: at(0.99), max: at(1) };
       };
-      const out = { draws: perf.draws, writes: perf.writes, searches: perf.searches - perf.searchBase, drawMs: q(perf.ms), lagMs: q(perf.lag), ticks: perf.ticks, tickGapMaxMs: perf.gapMax };
-      Object.assign(perf, { draws: 0, writes: 0, ms: [], lag: [], ticks: 0, gapMax: 0, searchBase: perf.searches });
+      const out = { draws: perf.draws, writes: perf.writes, searches: perf.searches - perf.searchBase, drawMs: q(perf.ms), lagMs: q(perf.lag), ticks: perf.ticks, tickGapMaxMs: perf.gapMax, ...(perf.errors ? { errors: perf.errors, lastError: perf.lastError } : {}),
+        ...(hb ? { design: 'b', composes: perf.composes, composeMs: q(perf.cms) } : {}) };
+      Object.assign(perf, { draws: 0, writes: 0, ms: [], lag: [], ticks: 0, gapMax: 0, searchBase: perf.searches, errors: 0, lastError: null, composes: 0, cms: [] });
       return out;
     },
     /** The HUD state as drawn (the design's data shape), its layout and its QA. */
-    hud: (t = now()) => ({ state: hudState(t), layout: lastLayout, qa: lastQa }),
+    hud: (t = now()) => (hb ? { state: hudState(t), layout: null, qa: hb.qa, model: hb.model, plan: hb.plan } : { state: hudState(t), layout: lastLayout, qa: lastQa }),
     state: () => {
       const cur = current();
       return {

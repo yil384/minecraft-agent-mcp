@@ -201,6 +201,9 @@ export function loadConfig(env = process.env) {
     // a test caller (TEST SCRIPT: the check scripts, by their MCP client name) gets no Facebook live from live_view
     // unless this is on: the live videos a day are few (FB_MAX_PER_DAY) and meant for real games
     testLives: r.bool('MCP_TEST_LIVE', false),
+    // with it on, a test caller's live_view has the camera film its game for the recording only (RECORD on the camera
+    // service), never on Facebook: how the recording is tested without spending a live video
+    testRecord: r.bool('MCP_TEST_RECORD', false),
     maxSessions,
     // live MCP games one address may hold (behind a cloud client, many people can share one address)
     mcpGamesPerAddress: r.int('WEB_MCP_GAMES_PER_ADDRESS', Math.max(2, maxSessions), 1, 64),
@@ -217,8 +220,22 @@ export function loadConfig(env = process.env) {
     localPeers: r.str('WEB_LOCAL_PEERS', '').split(',').map((x) => x.trim()).filter(Boolean),
     // this server's URL on this machine, for links when a request does not say (compose.yaml sets the host's port)
     localUrl: r.str('WEB_LOCAL_URL', '').replace(/\/+$/, ''),
+    // limits for a server you share (README, "Hosting a public server"): new games one address may start in an
+    // hour, the requests one MCP session may send in a minute
+    mcpStartsPerHour: r.int('WEB_MCP_STARTS_PER_HOUR', 10, 1, 10_000),
+    mcpRequestsPerMinute: r.int('WEB_MCP_REQUESTS_PER_MINUTE', 120, 10, 100_000),
+    // PUBLIC_PLAY=off closes the server to new games (start_game answers CLOSED) except for the owner's key
+    // (MCP_OWNER_KEY); POST /admin/public does the same at once, without a restart. PUBLIC_CHAT=off keeps say (in-game
+    // chat) to the owner's key
+    publicPlay: r.bool('PUBLIC_PLAY', true),
+    publicChat: r.bool('PUBLIC_CHAT', true),
+    // the project's source, linked from the page a browser gets at /mcp (empty: no link)
+    openSourceUrl: r.str('OPEN_SOURCE_URL', 'https://github.com/yil384/minecraft-agent-mcp'),
+    // address hashes that may not play (GET /admin/games shows them): comma separated
+    bannedIps: r.str('WEB_BANNED_IPS', '').split(',').map((x) => x.trim().toLowerCase()).filter(Boolean),
     maxBodyBytes: r.int('WEB_MAX_BODY', 8_192, 1_024, 1_048_576),
   };
+  if (web.openSourceUrl && !/^https:\/\/[^\s"<>]+$/.test(web.openSourceUrl)) problems.push(`OPEN_SOURCE_URL must be an https URL (got "${web.openSourceUrl}")`);
   for (const h of web.allowedHosts) if (!/^\.?[a-z0-9]([a-z0-9.-]{0,251}[a-z0-9])?$/.test(h)) problems.push(`WEB_ALLOWED_HOSTS must be host names (or .domain for its subdomains), separated by commas (got "${h}")`);
   for (const t of web.localPeers) if (t !== 'gateway' && !parseAddressRange(t)) problems.push(`WEB_LOCAL_PEERS must be IP addresses, ranges or the word gateway, separated by commas (got "${t}")`);
   if (web.localUrl) {
@@ -248,6 +265,9 @@ export function loadConfig(env = process.env) {
     problems.push('WEB_ADMIN_TOKEN must be at least 24 characters (make one with: openssl rand -base64 24)');
   }
   hidden(web, 'adminToken', adminToken);
+  // the salt of the address hashes (logs and the operator see a hash, never an address); without it, one made from
+  // the admin token (stable across restarts), else a random one for this process
+  hidden(web, 'ipSalt', r.str('WEB_IP_SALT', ''));
   // A secret the proxy in front adds to every request it forwards (X-Proxy-Secret; Caddy: header_up). When the published
   // port goes through docker-proxy, every connection arrives from the bridge gateway, the proxy's and any local user's
   // alike: the address cannot tell them apart, the secret can.
@@ -257,6 +277,13 @@ export function loadConfig(env = process.env) {
   }
   if (proxySecret && trustProxy === 'off') problems.push('WEB_PROXY_SECRET needs WEB_TRUST_PROXY (cloudflare, or the number of proxies that append to X-Forwarded-For)');
   hidden(web, 'proxySecret', proxySecret);
+  // The owner's key (.env, never in code): an MCP connection that brings it (?owner=<key> on the MCP URL, or the header
+  // X-Owner-Key) puts its games first in line for the camera (src/fb-live.js, src/live-local.js) and for a bot, plays
+  // while public play is off, may use say, and is held to none of the per-address limits or bans
+  const ownerKey = r.str('MCP_OWNER_KEY', '');
+  if (ownerKey && (ownerKey.length < 16 || !/^[A-Za-z0-9_-]+$/.test(ownerKey))) problems.push('MCP_OWNER_KEY must be at least 16 letters, digits, _ or - (make one with: openssl rand -hex 16)');
+  if (ownerKey && ownerKey === accessKey) problems.push('MCP_OWNER_KEY must differ from MCP_ACCESS_KEY: everyone with the MCP URL has the access key');
+  hidden(web, 'ownerKey', ownerKey);
 
   // Which body plays a guest game: mineai (one Mine AI MCP host per game in its own process, src/mineai/; what the
   // Docker setup runs) or ours (mineflayer in this process, src/body.js; development, tests and --fake-bot).
@@ -289,7 +316,7 @@ export function loadConfig(env = process.env) {
     // prismarine-viewer package is installed: its textures are Mojang's, so it is not a dependency of this project)
     views: r.bool('MINEAI_VIEWS', r.bool('VIEW_3D', true)),
     // the body and the player (src/mineai/care.js): advise (the default: the player plans its survival from the advice
-    // in every reply; the body acts by itself only through its reflexes), full (it also shelters, eats, hunts, crafts
+    // in every reply; the body acts by itself only by the rules the player set, none at the start), full (it also shelters, eats, hunts, crafts
     // a shield, armor and spare tools and goes back after a death by itself, between the player's calls: for casual
     // guests), off (only their reflexes, as they come). true and false, the old values, are full and off.
     care: (() => {
@@ -341,6 +368,14 @@ export function loadConfig(env = process.env) {
     // of the agent's calls; or 'landscape', the game alone at 1280x720
     layout: r.oneOf('STREAM_LAYOUT', 'ui', ['ui', 'terminal', 'landscape']),
     uiSize: r.oneOf('STREAM_UI_SIZE', '1080x1080', ['1080x1080', '1080x1200', '1080x1350']),
+    // the HUD's design in the ui layout: 'b' (concept B "Speedrun broadcast", src/hud-b.js) or 'final' (the one before)
+    hud: r.oneOf('STREAM_HUD', 'b', ['b', 'final']),
+    // a logo at the top right of the video and on the live page's poster (B only; never in the clean recording): off
+    // (the default), a transparent light logo drawn as it is with a hard dark shadow (plain), or a light logo on a white
+    // card (card); STREAM_LOGO_FILE its PNG, a name in assets/ui, a path under assets/ or an absolute path (default: the
+    // project's pixel logo, assets/brand/picasso-lab-pixel-230.png, which is not under the Apache licence: NOTICE)
+    logo: r.oneOf('STREAM_LOGO', 'off', ['off', 'card', 'plain']),
+    logoFile: r.str('STREAM_LOGO_FILE', ''),
     terminalSize: r.oneOf('STREAM_TERMINAL_SIZE', '1080x1920', ['1080x1920', '1080x1350']),
     // the sound: the game's own from the client (STREAM_GAME_AUDIO, its music off), and a soft CC0 music bed under it
     // (STREAM_MUSIC, assets/ui/music), ducked while the game is loud, then a limiter
@@ -358,7 +393,8 @@ export function loadConfig(env = process.env) {
       msaClientId: r.str('CAMERA_MSA_CLIENT_ID', ''),
       name: r.str('CAMERA_NAME', ''),
       gl: r.oneOf('CAMERA_GL', 'cpu', ['cpu', 'gpu']),
-      glThreads: r.int('CAMERA_GL_THREADS', 8, 1, 64),
+      // llvmpipe's threads: 8 at 960x540; the film's 1920x1080 wants 16 (and CAMERA_CPUS=24)
+      glThreads: r.int('CAMERA_GL_THREADS', r.bool('CAMERA_FILM', false) ? 16 : 8, 1, 64),
       javaThreads: r.int('CAMERA_JAVA_THREADS', 4, 1, 64),
       heapMB: r.int('CAMERA_HEAP_MB', 2048, 512, 16_384),
       maxFps: r.int('CAMERA_MAX_FPS', 30, 10, 120),
@@ -366,6 +402,9 @@ export function loadConfig(env = process.env) {
       graphics: r.oneOf('CAMERA_GRAPHICS', 'fast', ['fast', 'fancy']),
       display: r.int('CAMERA_DISPLAY', 99, 1, 900),
       scale: r.num('CAMERA_SCALE', 0.75, 0.5, 1),
+      // film mode (off by default): the client drawn at 1920x1080 for the clean recording (the live is scaled down to
+      // its 1080 square as always); costs client frames on llvmpipe (docs/CONFIG.md, "Recordings")
+      film: r.bool('CAMERA_FILM', false),
       javaNice: r.int('CAMERA_NICE', 5, 0, 19),
       idleMs: r.int('CAMERA_IDLE_MS', 600_000, 0, 86_400_000),
       // client mods from the camera's install (docker/camera/mods.json), comma-separated; 'none' runs the vanilla client
@@ -432,8 +471,21 @@ export function loadConfig(env = process.env) {
     problems.push('the camera has nowhere to send the picture: set LIVE_VIEW=local or facebook (or STREAM_RTMP_URL, STREAM_OUT_DIR)');
   }
 
+  // the recordings of the games the camera films (the camera service; src/recorder.js): the clean game, the stream as it
+  // went out, the HUD's timeline, per game under RECORD_DIR; old ones out by age and by the total size
+  const record = {
+    on: r.bool('RECORD', false),
+    root: r.str('RECORD_DIR', '') ? path.resolve(r.str('RECORD_DIR', '')) : path.join(ROOT, 'recordings'),
+    maxBytes: r.int('RECORD_MAX_GB', 150, 1, 10_000) * 2 ** 30,
+    keepDays: r.int('RECORD_KEEP_DAYS', 30, 1, 3_650),
+    crf: r.int('RECORD_CRF', 18, 10, 35),
+    preset: r.oneOf('RECORD_PRESET', 'veryfast', ['ultrafast', 'superfast', 'veryfast', 'faster', 'fast', 'medium']),
+    nice: r.int('RECORD_NICE', 10, 0, 19),
+  };
+
+  // every problem at once, the recording's too
   if (problems.length) throw new ConfigError(problems);
-  return deepFreeze({ root: ROOT, mc, web, body, mineai, log, stream, fb });
+  return deepFreeze({ root: ROOT, mc, web, body, mineai, log, stream, fb, record });
 }
 
 /** The process-wide config, read from process.env at first import. */

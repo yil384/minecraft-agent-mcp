@@ -13,9 +13,11 @@
 // so the service (scripts/stream.mjs --serve) and the agent drive it like any manager. A guest game that starts is put
 // on the channel; with no broadcast running, the channel creates one (Facebook shows a stream only if it connects after
 // the live video exists), starts the camera stream to its secure_stream_url and reads the video's permalink for the
-// embed. The camera follows one game: the one whose live_view request came last (focus), else the game it already
-// films, else the newest. When the filmed game ends the camera moves to another game on the channel; when no game is
-// left the stream stops and the live video is ended (end_live_video=true). A broadcast that fails or that Facebook ends
+// embed. The camera is first come, first served: it stays on the game that has it until
+// that game ends (or has made no call for 5 minutes while others wait), then goes to the next game in line, the games
+// that called live_view in the order of their first call; the owner's games (MCP_OWNER_KEY) first, a test's game last.
+// Each game has its own live video: when the camera moves on, the last game's live video is ended and the next one's
+// started. When no game is left the stream stops and the live video is ended (end_live_video=true). A broadcast that fails or that Facebook ends
 // is ended and, while games remain, replaced with a backoff. Live videos left open by a crash (the ids in a small state
 // file, and any open live video of the Page whose description carries this install's marker) are ended at start.
 
@@ -45,8 +47,8 @@ export const MARKER = 'Streamed automatically by a self-hosted agent game server
 export const markerFor = (installId) => (/^[A-Za-z0-9_-]{4,64}$/.test(String(installId ?? ''))
   ? `Streamed automatically by a self-hosted agent game server (install ${installId}).` : MARKER);
 export const NOT_AFFILIATED = 'Not an official Minecraft product; not approved by or associated with Mojang or Microsoft. Not affiliated with Meta.';
-export const DEFAULT_DESCRIPTION = 'An AI agent plays Minecraft: Java Edition on a self-hosted server, and one camera follows the game that '
-  + 'asked for the live view most recently.';
+export const DEFAULT_DESCRIPTION = 'An AI agent plays Minecraft: Java Edition on a self-hosted server; one camera films one game at a '
+  + 'time, first come, first served.';
 /** A live video's description: the operator's text (FB_DESCRIPTION) or ours, the disclaimer, and the marker. */
 export const descriptionFor = ({ text = '', installId = '' } = {}) => `${clip(text, 600) || DEFAULT_DESCRIPTION} ${NOT_AFFILIATED} ${markerFor(installId)}`;
 /** The description with the default text and no install id. */
@@ -198,6 +200,8 @@ export function createGraph(o) {
       ownerId ??= String((await call('GET', 'me', { fields: 'id' }, { what: 'read the profile' }))?.id ?? '') || null;
       return ownerId;
     },
+    /** The owner's numeric id when known already (no call). */
+    knownOwner: () => ownerId,
     scrub,
     /** Keep this text (a stream key) out of every message from now on. */
     hide(s) { if (s) secrets.add(String(s)); },
@@ -269,11 +273,16 @@ export function createLiveChannel(o) {
   const retryMs = o.retryMs ?? [5_000, 15_000, 30_000, 60_000, 120_000];
   const event = (kind, data = {}) => { try { o.log?.event(kind, data); } catch { /* best effort */ } };
 
-  const games = new Map(); // id -> {id, player, startedAt, seenAt, requestedAt, offs}
+  const games = new Map(); // id -> {id, player, startedAt, seenAt, requestedAt, activeAt, local, owner, yielded, offs}
+  const idleMs = o.idleMs ?? 300_000; // a game on camera that makes no call this long gives the camera to the next
+  const leaseMs = o.leaseMs ?? 1_800_000; // a game's longest life, for the wait in line
   // the HUD of every game, kept while it is off camera (src/live-terms.js)
   const terms = createTermStore();
   const backfill = (id, stream) => terms.backfill(id, stream);
   const asked = new Map(); // id -> when live_view asked for a game the channel does not have yet
+  const askedLocal = new Set(); // of those, the tests' games asked for the recording only
+  const askedOwner = new Set(); // of those, the owner's
+  const askedN = new Map(); // their order
   let focus = null; // the game the camera films
   let b = null; // the broadcast: {id, game, state, videoUrl, embedUrl, createdAt, liveAt, publishing, stream, timer, status}
   let failures = [];
@@ -406,6 +415,16 @@ export function createLiveChannel(o) {
     if (o.gameTtlMs > 0) {
       for (const g of [...games.values()]) if (now() - g.seenAt > o.gameTtlMs) api.stop(g.id, 'the agent stopped reporting the game');
     }
+    // the game on camera has made no call for 5 minutes while others wait: it goes to the back of the line
+    const cur = focus ? games.get(focus) : null;
+    const lastSign = cur ? Math.max(cur.activeAt ?? 0, cur.camAt ?? 0, cur.requestedAt) : 0;
+    if (cur && !cur.yielded && cur.requestedAt > 0 && now() - lastSign > idleMs && queue().some((g) => g !== cur)) {
+      cur.yielded = true;
+      cur.requestedAt = now();
+      cur.reqN = ++reqN;
+      event('fb_idle_handover', { game: cur.id, idleS: Math.round((now() - lastSign) / 1000) });
+      kick();
+    }
   }, o.sweepMs ?? 30_000);
   retryTimer.unref?.();
 
@@ -413,9 +432,22 @@ export function createLiveChannel(o) {
    * Live only on demand: a game is filmed only after live_view asked for it (a game that merely started, a testing
    * check or a bench never goes live). The games that asked, newest request first.
    */
-  const wanted = () => [...games.values()].filter((g) => g.requestedAt > 0).sort((x, y) => y.requestedAt - x.requestedAt);
-  /** The game the camera should film: the one whose live_view request came last. */
-  const pick = () => wanted()[0]?.id ?? null;
+  // the line: the games that asked, by their first call; the owner's games first (demos), a test's game (filmed for the
+  // recording only) after every player's
+  const rank = (g) => (g.owner ? 0 : g.local ? 2 : 1);
+  let reqN = 0; // the order of the calls, for calls in the same millisecond
+  const queue = () => [...games.values()].filter((g) => g.requestedAt > 0).sort((x, y) => rank(x) - rank(y) || x.requestedAt - y.requestedAt || (x.reqN ?? 0) - (y.reqN ?? 0));
+  /**
+   * The game the camera should film: the one that has it, until it ends, has gone idle while others wait, or a game
+   * of a higher rank asks (the owner's over a player's, a player's over a test's); else the first in line.
+   */
+  const pick = () => {
+    const q = queue();
+    if (!q.length) return null;
+    const cur = focus ? games.get(focus) : null;
+    if (cur && cur.requestedAt > 0 && !cur.yielded && rank(q[0]) >= rank(cur)) return cur.id;
+    return q[0].id;
+  };
 
   // ----- the broadcast's life, one step at a time
   function kick() {
@@ -436,32 +468,57 @@ export function createLiveChannel(o) {
   async function reconcile() {
     swept ??= sweep();
     await swept;
+    const was = focus;
     focus = pick();
+    // the idle clock of a game starts again when it gets the camera (in line it made no call: it was waiting)
+    if (focus) { const fg = games.get(focus); fg.yielded = false; if (focus !== was) fg.camAt = now(); }
+    // the camera moves on to the next game in line: the last game's live video (or recording) ends, the next one's
+    // starts below
+    if (b && focus && b.game !== focus && b.state !== 'ending') await finish(`the camera moves on to game ${focus}`, b);
+    // recording only (no live video: the cap, a long rest after failures) and the live video can start now: over to it
+    if (b?.local && !b.test && focus && !games.get(focus)?.local && !closing && restingUntil <= now() && !capped()) await finish('the live video can start now', b);
     if (b && (closing || !focus)) { await finish(closing ? 'the service stopped' : 'no game that asked for it is left'); return; }
     if (closing || !focus) return;
     if (!b) {
-      if (restingUntil > now()) return;
+      // a test's game asked for the recording only: never a live video
+      if (games.get(focus)?.local) { if (o.record) beginLocal('test'); return; }
+      if (restingUntil > now()) {
+        // a long rest (a refusal only a person can fix): the game is still filmed for the recording
+        if (o.record && restingUntil - now() >= 60_000) beginLocal('failing');
+        return;
+      }
       cap = capped();
       if (cap) {
         event('fb_capped', { game: focus, why: cap.why, untilS: Math.ceil((cap.until - now()) / 1000) });
         setTimeout(() => kick(), Math.max(1_000, cap.until - now() + 50)).unref?.();
+        if (o.record) beginLocal('capped'); // Facebook is one output: the camera films for the recording anyway
         return;
       }
       await begin();
-      return;
     }
-    if (b.stream && focus && b.game !== focus && b.state !== 'ending') {
-      const g = games.get(focus);
-      const from = b.game;
-      b.game = focus;
-      event('fb_camera', { broadcast: b.id, from, to: focus });
-      let moving;
-      try { moving = b.stream.follow(g.player); } catch (err) { moving = Promise.reject(err); }
-      // follow() empties the terminal before its first wait: what the new game has done so far goes in now, before
-      // any new line of it
-      backfill(focus, b.stream);
-      try { await moving; } catch (err) { event('fb_error', { what: 'move the camera', message: clip(err?.message ?? err) }); }
-      graph.updateLive(b.id, { title: titleFor(title, focus) }).catch(() => {});
+  }
+
+  /** The camera films the focused game with no live video: the stream goes to the recording (src/recorder.js). */
+  function beginLocal(why) {
+    const game = games.get(focus);
+    if (!game) return;
+    const me = { id: null, local: true, test: why === 'test', why, videoId: null, game: focus, state: 'recording', createdAt: now(), liveAt: now(), publishing: false, stream: null, timer: null, status: null, videoUrl: null, embedUrl: null };
+    b = me;
+    try {
+      const stream = o.createStream({ ...(o.streamOptions ?? {}), output: 'record', record: { ...o.record, game: focus }, player: game.player, event: (k, d) => event(k, { session: focus, local: true, ...d }) });
+      me.stream = stream;
+      backfill(focus, stream);
+      stream.finished.then((res) => {
+        if (b !== me || me.state === 'ending') return;
+        event('fb_local_lost', { game: me.game, reason: clip(res?.reason ?? 'the stream ended', 200) });
+        b = null;
+        rest();
+      });
+      Promise.resolve().then(() => stream.start()).catch(() => {});
+      event('fb_local', { game: focus, why });
+    } catch (err) {
+      if (b === me) b = null;
+      event('fb_error', { what: 'the recording-only stream', message: clip(err?.message ?? err) });
     }
   }
 
@@ -499,7 +556,7 @@ export function createLiveChannel(o) {
       const now0 = games.get(me.game) && games.get(me.game).requestedAt > 0 ? me.game : pick();
       me.game = now0;
       me.state = 'connecting';
-      const stream = o.createStream({ ...(o.streamOptions ?? {}), output: ingest, player: games.get(now0).player, event: (k, d) => event(k, { session: now0, broadcast: me.id, ...d }) });
+      const stream = o.createStream({ ...(o.streamOptions ?? {}), output: ingest, player: games.get(now0).player, ...(o.record ? { record: { ...o.record, game: now0 } } : {}), event: (k, d) => event(k, { session: now0, broadcast: me.id, ...d }) });
       me.stream = stream;
       backfill(now0, stream);
       stream.on?.('stream_publishing', () => { me.publishing = true; me.publishingAt = now(); poll(me, Math.min(settleMs + 100, pollMs)); });
@@ -595,8 +652,11 @@ export function createLiveChannel(o) {
       if (closing || !ID_RE.test(String(id)) || !NAME_RE.test(String(player ?? ''))) return null;
       const known = games.get(id);
       if (known) { known.seenAt = now(); return { id }; }
-      const g = { id, player, startedAt: now(), seenAt: now(), requestedAt: asked.get(id) ?? 0, offs: [] };
+      const g = { id, player, startedAt: now(), seenAt: now(), activeAt: now(), requestedAt: asked.get(id) ?? 0, reqN: askedN.get(id) ?? 0, local: askedLocal.has(id), owner: askedOwner.has(id), yielded: false, offs: [] };
+      askedN.delete(id);
       asked.delete(id);
+      askedLocal.delete(id);
+      askedOwner.delete(id);
       games.set(id, g);
       if (typeof body?.on === 'function') {
         try {
@@ -619,30 +679,62 @@ export function createLiveChannel(o) {
       event('fb_game_end', { session: id, why: clip(why, 120), games: games.size });
       return kick();
     },
-    /** live_view asked for this game: the camera films it from now on (until another game asks). Returns live(). */
-    focus(id) {
+    /**
+     * live_view asked for this game: in line for the camera (its place kept from its first call), or on it. owner: the
+     * owner's game (MCP_OWNER_KEY), first in line and taking the camera from a player's. Returns live(id).
+     */
+    focus(id, { local = false, owner = false } = {}) {
       if (!ID_RE.test(String(id))) return api.live();
       const g = games.get(id);
-      if (g) { g.requestedAt = now(); g.seenAt = now(); } else {
-        asked.set(id, now());
-        for (const [k, t] of asked) if (now() - t > 120_000) asked.delete(k);
+      if (g) {
+        if (!(g.requestedAt > 0)) { g.requestedAt = now(); g.reqN = ++reqN; }
+        g.seenAt = now(); g.activeAt = now();
+        if (local) g.local = true;
+        if (owner) g.owner = true;
+      } else {
+        if (!asked.has(id)) { asked.set(id, now()); askedN.set(id, ++reqN); }
+        if (local) askedLocal.add(id);
+        if (owner) askedOwner.add(id);
+        for (const [k, t] of asked) if (now() - t > 120_000) { asked.delete(k); askedLocal.delete(k); askedOwner.delete(k); }
       }
       kick();
-      return api.live();
+      return api.live(id);
     },
-    /** What the channel shows now: state off | starting | connecting | live | ending, the game on camera, the video. */
-    live() {
+    /**
+     * What the channel shows now: state off | starting | connecting | live | ending, the game on camera, the video. For a
+     * game (id) in line behind another: state queued, with its place and the wait (about, from the games' leases).
+     */
+    live(id = null) {
+      const out = api.liveNow();
+      if (id === null || !ID_RE.test(String(id))) return out;
+      const g = games.get(id);
+      const holder = pick() ?? b?.game; // the game that has the camera, or is about to (an owner's)
+      if (!g || !(g.requestedAt > 0) || !holder || holder === id) return out;
+      const line = queue().filter((x) => x.id !== holder);
+      const position = line.findIndex((x) => x.id === id) + 1;
+      if (position < 1) return out;
+      const left = (x) => Math.max(1, Math.ceil((leaseMs - (now() - x.startedAt)) / 60_000));
+      const h = games.get(holder);
+      const waitMin = (h ? left(h) : 0) + line.slice(0, position - 1).reduce((a, x) => a + left(x), 0);
+      return { ...out, state: 'queued', game: holder, queue: { position, waitMin } };
+    },
+    liveNow() {
       const asked = pick();
-      const resting = !b && asked && restingUntil > now();
-      const capNow = !b && asked && !resting && cap && cap.until > now() ? cap : null;
+      // recording only: the live video's own state (capped, retrying) for the agent; "recording" for a test's game
+      const loc = b?.local && b.state !== 'ending' ? b : null;
+      const resting = (!b || loc) && asked && restingUntil > now();
+      const capNow = (!b || loc) && asked && !resting && cap && cap.until > now() ? cap : null;
       return {
         fb: true,
         channel: 'facebook',
-        state: b ? (b.state === 'ending' ? 'ending' : b.state) : asked ? (resting ? 'retrying' : capNow ? 'capped' : 'starting') : 'off',
+        state: loc ? (loc.test ? 'recording' : resting ? 'retrying' : capNow ? 'capped' : 'starting') : b ? (b.state === 'ending' ? 'ending' : b.state) : asked ? (resting ? 'retrying' : capNow ? 'capped' : 'starting') : 'off',
+        ...(loc ? { recording: true } : {}),
         game: b?.game ?? asked,
         videoUrl: b?.videoUrl ?? null,
         embedUrl: b?.embedUrl ?? null,
         liveSince: b?.liveAt ? new Date(b.liveAt).toISOString() : null,
+        videoId: b?.videoId ?? (String(b?.videoUrl ?? '').match(/\/videos\/(\d+)/)?.[1] ?? null),
+        owner: graph.knownOwner?.() ?? null,
         warning: b?.warning ?? null,
         aspect: b?.stream?.aspect ?? o.aspect ?? '16/9',
         games: games.size,
@@ -654,6 +746,9 @@ export function createLiveChannel(o) {
     term(id, u) {
       if (!ID_RE.test(String(id)) || !u) return;
       terms.keep(id, u);
+      // a call of the game: it is not idle (the camera's hand-over after 5 minutes without one)
+      const g = games.get(id);
+      if (g && Array.isArray(u.lines) && u.lines.some((l) => l?.k === 'call')) g.activeAt = now();
       if (id === b?.game && b?.stream) b.stream.term?.(u);
     },
     caption(id, text, pose) {

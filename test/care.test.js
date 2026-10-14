@@ -444,7 +444,7 @@ test('care in the body: the armor skill crafts and wears; policy knobs stay in t
 test('care through MCP: what the body did on its own is in the next reply, once', async () => {
   const hosts = fakeHosts(() => ({ inventory: { cobblestone: 15 } }));
   const web = createWeb({
-    config: loadConfig({ WEB_HOST: '127.0.0.1', WEB_PORT: '0' }), log, skills: MINEAI_SKILLS, careMode: 'full',
+    config: loadConfig({ WEB_HOST: '127.0.0.1', WEB_PORT: '0', PUBLIC_CHAT: 'on', WEB_MCP_REQUESTS_PER_MINUTE: '100000' }), log, skills: MINEAI_SKILLS, careMode: 'full',
     makeBody: (id, o) => createMineAiBody({ config, log, hosts, gameId: id, username: `Tst_rv_${id}`, viewId: o?.viewId, care: 'full', careTickMs: 30, careIdleMs: 50 }),
   });
   const { url } = await web.start();
@@ -518,19 +518,29 @@ test('advise: the reflex knobs in words', () => {
   assert.match(describeReflexes(CARE_DEFAULTS, 'full'), /at food 14 or less/);
 });
 
-test('advise loop: no plan carried out by itself, advice instead; its reflexes stay', async () => {
+test('advise loop: no plan carried out by itself, advice instead; a reflex with its rule off is the body\'s own, with the rule on the agent\'s', async () => {
   const rig = careRig({ mode: 'advise', situation: situation({ clock: { timeOfDay: 14000, phase: 'night' } }), inventory: { cobblestone: 20 } });
   rig.care.playerCalled(); // the player plays (before the first call a new bot shelters on its own: F17)
   rig.state.events.push({ type: 'survival_outcome', observedAt: new Date(NOW).toISOString(), payload: { source: 'hostile_reflex', evidence: { response: 'fight', cancelled: false, interrupted: null, outcome: { threats: [{ id: 3, name: 'zombie' }], attacks: 2, killedTargetIds: [3], explosions: 0, healthBefore: 20, healthAfter: 18 } } } });
   await rig.care.tick();
   assert.deepEqual(rig.calls, [], 'no shelter of its own');
   assert.equal(rig.care.advice()[0].kind, 'night');
-  assert.deepEqual(rig.care.since(0).map((e) => [e.source, e.kind]), [['reflex', 'fight']]);
-  assert.deepEqual(rig.care.counts(), { reflex: 1, care: 0 });
+  // no rule set (none at the start): the fight was the body's own
+  assert.deepEqual(rig.care.since(0).map((e) => [e.source, e.kind]), [['body', 'fight']]);
+  assert.deepEqual(rig.care.counts(), { reflex: 1, care: 0, rule: 0, body: 1, byRule: {} });
   // a tool about to break, or a death, is logged as something that happened, never counted as an action
   rig.care.add({ kind: 'tool', ok: false, text: 'its stone_pickaxe broke', reflex: true });
   rig.care.add({ kind: 'death', ok: false, text: 'died: was shot by Skeleton at 1 2 3' });
-  assert.deepEqual(rig.care.counts(), { reflex: 1, care: 0 });
+  assert.deepEqual(rig.care.counts(), { reflex: 1, care: 0, rule: 0, body: 1, byRule: {} });
+  // The agent sets defend (its call 4): the next fight is by its rule, with when the rule was set
+  rig.care.noteCall(4);
+  rig.care.setRules({ defend: true });
+  const fight = rig.care.add({ kind: 'fight', ok: true, text: 'fought zombie; health 20 -> 18', reflex: true });
+  assert.equal(fight.source, 'rule');
+  assert.equal(fight.rule, 'defend');
+  assert.deepEqual(fight.ruleSet, { value: true, atS: 0, call: 4 });
+  assert.deepEqual(rig.care.counts(), { reflex: 2, care: 0, rule: 1, body: 1, byRule: { defend: 1 } });
+  assert.deepEqual(rig.care.rules(), { rules: { defend: true, flee: false, escape: false, eat_below: 0 }, set: { defend: { value: true, atS: 0, call: 4 } } });
   assert.deepEqual(rig.events.filter((e) => ['tool', 'death'].includes(e.kind)).map((e) => e.source), ['event', 'event']);
   // the shelter skill: the same routine, as the player's action (no journal entry, counted as the player's)
   rig.state.situation.clock.timeOfDay = 14000;
@@ -549,19 +559,20 @@ test('advise loop: no plan carried out by itself, advice instead; its reflexes s
 test('advise in the body: the reflexes set as the knobs say (eat starving), attribution counted, Body advice in MCP replies', async () => {
   const hosts = fakeHosts(() => ({ inventory: { cobblestone: 15 } }));
   const web = createWeb({
-    config: loadConfig({ WEB_HOST: '127.0.0.1', WEB_PORT: '0' }), log, skills: MINEAI_SKILLS,
+    config: loadConfig({ WEB_HOST: '127.0.0.1', WEB_PORT: '0', PUBLIC_CHAT: 'on', WEB_MCP_REQUESTS_PER_MINUTE: '100000' }), log, skills: MINEAI_SKILLS,
     makeBody: (id, o) => createMineAiBody({ config, log, hosts, gameId: id, username: `Tst_rv_${id}`, viewId: o?.viewId, careTickMs: 30, careIdleMs: 50 }),
   });
   const { url } = await web.start();
   const c = new Client({ name: 'test', version: '1' });
   await c.connect(new StreamableHTTPClientTransport(new URL(`${url}/mcp`)));
   try {
-    assert.match(c.getInstructions?.() ?? '', /You plan everything: the body acts by itself only through its reflexes/);
+    assert.match(c.getInstructions?.() ?? '', /You decide everything: the body does nothing by itself, not even between your calls, except by rules you set \(start_game rules, or the policy skill at any time\)/);
     let r = await c.callTool({ name: 'start_game', arguments: { adult: true } });
     assert.ok(!r.isError, r.content[0].text);
+    assert.match(r.content.map((x) => x.text).join('\n'), /\nYour rules \(the body does nothing by itself but these; none set yet\): defend off \([^)]*\); flee off \([^)]*\); escape off \([^)]*\); eat_below off \([^)]*\)\. A rule acts within a second; your calls take seconds to minutes, and a zombie hits in one second: without defend and escape the bot dies more\. Decide now/);
     const fake = hosts.started[0].fake;
-    assert.ok(await until(() => fake.world.foodReflex === 'starving'), 'advise mode: the hunger reflex only when starving');
-    assert.equal(fake.world.hide, 'when_exposed');
+    // every game starts with no rule: their reflexes all off
+    assert.ok(await until(() => fake.world.foodReflex === 'never' && fake.world.escape === false && fake.world.melee === false && fake.world.hide === 'never' && fake.world.retreat === false), `${fake.world.foodReflex} ${fake.world.escape} ${fake.world.melee} ${fake.world.hide} ${fake.world.retreat}`);
     fake.world.timeOfDay = 15000;
     await sleep(200);
     assert.equal(fake.tools('build_structure').length, 0, 'no shelter by itself');
@@ -570,18 +581,22 @@ test('advise in the body: the reflexes set as the knobs say (eat starving), attr
     const t = r.content.map((x) => x.text).join('\n');
     assert.match(t, /Body advice \(the body will not do these by itself; your call\):\n- night \(time 15000\): no closed shelter around you.* \(to do it: shelter \{\}\)/);
     assert.equal(r.structuredContent.advice[0].hint.skill, 'shelter');
-    assert.match(t, /This game: 1 action by the agent, 0 reflexes \(100% the agent\)\.$/);
-    assert.deepEqual(r.structuredContent.attribution, { agent: 1, reflex: 0, care: 0, agentPct: 100 });
-    // a reflex switched off through the policy skill
-    r = await c.callTool({ name: 'play', arguments: { skill: 'policy', args: { eat: 'off', escape: 'off' } } });
-    assert.match(r.content.map((x) => x.text).join('\n'), /its reflexes: fights back or flees when a hostile mob comes for it; never eats by itself; leaves air, fire, lava and footing to you/);
-    assert.ok(await until(() => fake.world.foodReflex === 'never' && fake.world.escape === false, 6000));
+    assert.match(t, /This game: 1 action by the agent directly, 0 by rules the agent set, 0 by the body on its own \(100% decided by the agent\)\.$/);
+    assert.deepEqual(r.structuredContent.attribution, { agent: 1, reflex: 0, care: 0, agentPct: 100, rule: 0, body: 0, decidedPct: 100 });
+    // rules set mid-game with the policy skill (true and false read as on and off)
+    r = await c.callTool({ name: 'play', arguments: { skill: 'policy', args: { defend: true, escape: 'on', eat_below: 6 } } });
+    assert.match(r.content.map((x) => x.text).join('\n'), /your rules now: defend on \([^)]*\); flee off \([^)]*\); escape on \([^)]*\); eat_below 6 /);
+    assert.ok(await until(() => fake.world.foodReflex === 'starving' && fake.world.escape === true && fake.world.melee === true && fake.world.hide === 'when_exposed', 6000));
+    // a fight of the defend reflex now: by the agent's rule, with when it was set: play call 2 (the play calls are numbered as
+    // the replies and the stream number them, not every MCP call)
+    fake.world.events.push({ type: 'survival_outcome', observedAt: new Date().toISOString(), payload: { source: 'hostile_reflex', evidence: { response: 'fight', outcome: { response: 'fight', threats: [{ id: 3, name: 'zombie' }], killedTargetIds: [], attacks: 2, healthBefore: 20, healthAfter: 18 } } } });
+    assert.ok(await until(async () => /1 by rules the agent set \(defend, set at \d+:\d\d with call 2\)/.test((await c.callTool({ name: 'get_state', arguments: {} })).content.map((x) => x.text).join('\n')), 8000));
     r = await c.callTool({ name: 'play', arguments: { skill: 'shelter', args: {} } });
     assert.ok(fake.tools('build_structure').length > 0, 'the shelter skill builds');
     r = await c.callTool({ name: 'end_game', arguments: {} });
     // the report (the one-line prompt): who acted, and the advice declined, then followed with the shelter
-    assert.match(r.content[0].text, /^Game ended\.\n\nReport for game g\w+: goal free play;[\s\S]*\nThis game: 2 actions by the agent, 0 reflexes \(100% the agent\)\.\n/);
-    assert.match(r.content[0].text, /\n- \d+:\d\d \(no why given\) -> policy eat=off escape=off: ok\n- \d+:\d\d advice followed \(shelter\): night/);
+    assert.match(r.content[0].text, /^Game ended\.\n\nReport for game g\w+: goal free play;[\s\S]*\nThis game: 3 actions by the agent directly, 1 by rules the agent set \(defend, set at \d+:\d\d with call 2\), 0 by the body on its own \(100% decided by the agent\)\.\n/);
+    assert.match(r.content[0].text, /\n- \d+:\d\d \(no why given\) -> policy defend=on escape=on eat_below=6: ok\n/);
   } finally {
     await c.close();
     await web.stop?.();
@@ -602,7 +617,20 @@ test('advise on the way to the Nether: what the frame still needs, a death in la
   assert.equal(portal({ obsidian: 4 }).text, 'you carry 4 obsidian; a portal frame (build nether_portal) takes 12, and up to 2 more on uneven ground; collecting more needs a diamond pickaxe, a water bucket (bucket fill water), cobblestone to close off lava');
   assert.equal(portal({ obsidian: 4 }).hint, undefined);
   assert.deepEqual(portal({ obsidian: 4, water_bucket: 1, cobblestone: 20 }, [shield, stack('diamond_pickaxe', 1, 'hand')]).hint, { skill: 'collect', args: { block: 'obsidian', n: 10 } });
-  assert.deepEqual(portal({ obsidian: 14 }).hint, { skill: 'collect', args: { block: 'gravel', n: 10 } });
+  // the flint's odds and the iron, said (real game gd7540a: 9 gravel gave no flint, and the bucket had taken the
+  // last iron)
+  assert.deepEqual(portal({ obsidian: 14 }).hint, { skill: 'collect', args: { block: 'gravel', n: 22 } });
+  assert.equal(portal({ obsidian: 14, gravel: 9 }).text, '14 obsidian for the frame; flint_and_steel lights it: 1 iron_ingot (none left: mine 1 iron ore and smelt it) and 1 flint (a gravel mined drops flint 1 time in 10: about 10 gravel a flint, 22 for 9 chances in 10; the 9 gravel you carry can be placed and mined again)');
+  assert.deepEqual(portal({ obsidian: 14, flint: 1 }).hint, { skill: 'collect', args: { block: 'iron_ore', n: 1 } });
+  assert.deepEqual(portal({ obsidian: 14, flint: 1, raw_iron: 2 }).hint, { skill: 'smelt', args: { item: 'raw_iron', n: 1 } });
+  // early: with diamonds, the iron a bucket and flint_and_steel still take
+  const iron = (inventory, stacks = [shield]) => advise(situation(), { ...base, inventory, stacks }).find((a) => a.kind === 'iron');
+  assert.equal(iron({ diamond: 3, iron_ingot: 3 }).text, 'you carry 3 iron (ingots and raw iron); a bucket (water, to make obsidian) takes 3 and flint_and_steel (to light the portal) takes 1: mine 1 more iron ore and smelt it, and keep one ingot for flint_and_steel');
+  assert.deepEqual(iron({ diamond: 3, iron_ingot: 3 }).hint, { skill: 'collect', args: { block: 'iron_ore', n: 1 } });
+  assert.equal(iron({ diamond: 3, iron_ingot: 4 }), undefined, 'enough');
+  assert.match(iron({ water_bucket: 1, obsidian: 2 }, [shield, stack('diamond_pickaxe', 1, 'hand')]).text, /^you carry 0 iron .*; flint_and_steel \(to light the portal\) takes 1: mine 1 more iron ore/);
+  assert.equal(iron({ iron_ingot: 0 }), undefined, 'no diamonds yet: not on the way to the Nether');
+  assert.equal(iron({ diamond: 1, flint_and_steel: 1, bucket: 1 }), undefined);
   assert.deepEqual(portal({ obsidian: 14, flint: 1, iron_ingot: 2 }).hint, { skill: 'craft', args: { item: 'flint_and_steel', n: 1 } });
   assert.deepEqual(portal({ obsidian: 14, flint_and_steel: 1 }).hint, { skill: 'build', args: { blueprint: 'nether_portal', material: 'obsidian' } });
   assert.equal(advise(situation(), { ...base, memory: { portalBuilt: true }, inventory: { obsidian: 2 }, stacks: [shield] }).find((a) => a.kind === 'portal'), undefined, 'the frame stands');
@@ -651,13 +679,13 @@ test('care shield: a shield their guard reflex put straight into the off-hand co
   assert.equal(rig.calls.filter((c) => c.tool === 'equip').length, 0, 'nothing more to equip');
 });
 
-test('advise: before the player\'s first call a new bot shelters from hostile mobs; after it, never on its own', async () => {
+test('advise : nothing on its own before the first call either, hostile mobs near or not (F17\'s pre-call shelter is gone)', async () => {
   const zombie = { name: 'zombie', kind: 'hostile', nearest: { distance: 9, position: { x: 18, y: 64, z: -3 } } };
   const results = { build_structure: { status: 'succeeded', structure: { cells: 15, correct: 15, placed: 13, dug: 0, wrong: 0, kept: [], left: [], supports: [] } } };
-  const rig = careRig({ mode: 'advise', situation: situation({ nearby: { mobs: [zombie] } }), inventory: { cobblestone: 20 }, results });
+  const rig = careRig({ mode: 'advise', situation: situation({ nearby: { mobs: [zombie] }, clock: { timeOfDay: 15000 } }), inventory: { cobblestone: 20 }, results });
   await rig.care.tick();
-  assert.deepEqual(rig.calls.map((c) => c.tool), ['build_structure']);
-  assert.match(rig.care.since(0)[0].text, /^waiting for your first call with hostile mobs near or at night: closed itself in/);
+  assert.deepEqual(rig.calls, [], 'no pre-call action');
+  assert.deepEqual(rig.care.since(0), []);
   const quiet = careRig({ mode: 'advise', situation: situation({ nearby: { mobs: [zombie] } }), inventory: { cobblestone: 20 }, results });
   quiet.care.playerCalled();
   await quiet.care.tick();

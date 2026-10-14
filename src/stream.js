@@ -219,6 +219,15 @@ export function spawnEncoder(o) {
   const child = spawnNiced(o.ffmpeg, o.args, o.nice ?? 0, { stdio: rtmp ? [...o.stdio.slice(0, 3), 'pipe'] : o.stdio, env: o.env ?? childEnv() });
   if (!rtmp) return { child, publisher: null, failure: () => null };
   let why = null;
+  // the same bytes into a file as well (a recording of the stream as it went out: src/recorder.js)
+  if (o.tee) {
+    try {
+      const ws = fs.createWriteStream(o.tee);
+      ws.on('error', () => {});
+      child.stdio[3].on('data', (d) => { ws.write(d); });
+      child.on('exit', () => ws.end());
+    } catch { /* the recording goes without it */ }
+  }
   const publisher = (o.createPublisher ?? createRtmpPublisher)({ url: o.output, event: o.event, timeoutMs: o.timeoutMs, ca: o.ca });
   publisher.on('error', (err) => {
     why = `the ingest: ${clip(err?.message ?? err, 200)}`;
@@ -341,7 +350,7 @@ export const REFLEX_CAPTIONS = Object.freeze({
 export const sourced = (who, words) => (words ? `${who}: ${words.charAt(0).toLowerCase()}${words.slice(1)}` : '');
 
 /**
- * The live caption of a game from its body's events, with who acts: the player's skills (The agent), and while one of the
+ * The live caption of a game from its body's events, with who acts: the player's skills (the agent), and while one of the
  * runtime's reflexes has the body (BODY=mineai 'reflex' events), that reflex, then the skill again. put(text) shows
  * it. Returns the listeners' offs.
  */
@@ -368,7 +377,7 @@ export function managerConfig(c) {
     enabled: Boolean(c?.enabled), outputs: c?.outputs ?? [], outDir: c?.outDir || '', max: c?.max ?? 0,
     options: {
       fps: c?.fps, bitrateK: c?.bitrateK, clock: c?.clock || undefined, clockTz: c?.clockTz,
-      layout: c?.layout, terminalSize: c?.terminalSize, uiSize: c?.uiSize,
+      layout: c?.layout, terminalSize: c?.terminalSize, uiSize: c?.uiSize, hud: c?.hud, logo: c?.logo, logoFile: c?.logoFile,
       gameAudio: c?.gameAudio, music: c?.music, musicFile: c?.musicFile, musicDb: c?.musicDb, gameDb: c?.gameDb,
     },
   };
@@ -543,7 +552,9 @@ export function createStreamService({ manager, log, token = '' } = {}) {
       if (!authorized(req)) { req.resume(); return json(res, 401, { error: 'this camera service needs its token (STREAM_SERVICE_TOKEN)' }); }
       if (/^\/live\/?(?:\?.*)?$/.test(String(req.url))) {
         if (req.method !== 'GET') return json(res, 405, { error: 'use GET' });
-        return json(res, 200, typeof manager.live === 'function' ? manager.live() : { fb: false, channel: null, state: 'off' });
+        // ?game=<id>: that game's place in line when another has the camera
+        const g = new URL(String(req.url), 'http://local').searchParams.get('game');
+        return json(res, 200, typeof manager.live === 'function' ? manager.live(g && ID_RE.test(g) ? g : null) : { fb: false, channel: null, state: 'off' });
       }
       const h = String(req.url).match(/^\/hls\/([^/?]+)(?:\?.*)?$/);
       if (h) {
@@ -565,7 +576,9 @@ export function createStreamService({ manager, log, token = '' } = {}) {
           if (!NAME_RE.test(String(body.player))) return json(res, 400, { error: 'player must be a Minecraft name' });
           manager.start(id, { player: body.player });
         }
-        return json(res, 200, await manager.focus(id));
+        // local: a test's game filmed for the recording only, never on Facebook (MCP_TEST_RECORD); owner: the owner's
+        // game (MCP_OWNER_KEY, checked by the agent), first in line
+        return json(res, 200, await manager.focus(id, { ...(body.local === true ? { local: true } : {}), ...(body.owner === true ? { owner: true } : {}) }));
       }
       if (id !== undefined && !ID_RE.test(id)) return json(res, 400, { error: 'bad id' });
       if (!id) return req.method === 'GET' ? json(res, 200, { enabled: manager.enabled, streams: manager.list() }) : json(res, 405, { error: 'use GET' });
@@ -658,13 +671,13 @@ export function createRemoteStreamManager({ url, log, token = '', timeoutMs = 5_
       termChain.delete(id);
     },
     /** live_view asked for this game: the channel's camera films it from now on. The channel's state, or null. */
-    async focus(id) {
-      const r = await call('POST', `/streams/${encodeURIComponent(id)}/focus`, asks.get(id) ?? {}).catch(() => null);
+    async focus(id, { local = false, owner = false } = {}) {
+      const r = await call('POST', `/streams/${encodeURIComponent(id)}/focus`, { ...(asks.get(id) ?? {}), ...(local ? { local: true } : {}), ...(owner ? { owner: true } : {}) }).catch(() => null);
       return r?.status === 200 && isChannel(r.body) ? r.body : null;
     },
-    /** The channel's state (GET /live), or null. */
-    async live() {
-      const r = await call('GET', '/live').catch(() => null);
+    /** The channel's state (GET /live; with a game: its place in line), or null. */
+    async live(id = null) {
+      const r = await call('GET', id ? `/live?game=${encodeURIComponent(id)}` : '/live').catch(() => null);
       return r?.status === 200 && isChannel(r.body) ? r.body : null;
     },
     async stop(id) {

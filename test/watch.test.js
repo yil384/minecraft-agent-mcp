@@ -1,5 +1,5 @@
 // test/watch.test.js - the local watch page (LIVE_VIEW=local): the channel (src/live-local.js: on demand only, one
-// camera that follows the game whose live_view came last, its HLS folder emptied when nothing is filmed), MCP live_view
+// camera, first come, first served, its HLS folder emptied when nothing is filmed), MCP live_view
 // in local mode (the watch page's link, never a player), the page and its routes in src/web.js (the page with its CSP,
 // hls.js and the page script from this server, the status in words, the HLS files, a game's page only while the camera
 // films it, unknown and ended ids, the camera page under the access key), and end to end with real ffmpeg: a test
@@ -70,7 +70,7 @@ function stubStreams({ write = true } = {}) {
   return { create, made };
 }
 
-test('local channel: a game is filmed only after live_view asks; the camera follows the last asker; HLS files by name only; the folder goes with the broadcast', async (t) => {
+test('local channel: a game is filmed only after live_view asks; first come, first served (a later asker waits in line); HLS files by name only; the folder goes with the broadcast', async (t) => {
   const dir = tmp();
   const rows = [];
   const streams = stubStreams();
@@ -96,17 +96,22 @@ test('local channel: a game is filmed only after live_view asks; the camera foll
   assert.equal(streams.made[0].o.player, 'Bot_aaaa');
   ch.term('g1', { lines: [{ k: 'call', t: '> play' }] });
   assert.equal(streams.made[0].terms.length, 1, 'the HUD of the game on camera');
-  // a second game asks: the camera moves, the broadcast (and its folder) stays
+  // a second game asks: first come, first served: it is in line, the camera stays on g1
   ch.start('g2', { player: 'Bot_bbbb' });
-  ch.focus('g2');
+  const q = ch.focus('g2');
+  await ch.settled();
+  assert.deepEqual([q.state, q.game, q.queue.position], ['queued', 'g1', 1]);
+  assert.ok(q.queue.waitMin >= 1, 'about how long');
+  assert.equal(ch.live().game, 'g1');
+  assert.equal(ch.live('g1').state, 'live', 'the game on camera is not in line');
+  assert.deepEqual(streams.made[0].calls, ['start Bot_aaaa']);
+  // g1 ends: the camera moves to g2, the broadcast (and its folder) stays; then nothing is left and the folder goes
+  await ch.stop('g1');
   await until(() => ch.live().game === 'g2');
   await ch.settled();
   assert.deepEqual(streams.made[0].calls, ['start Bot_aaaa', 'follow Bot_bbbb']);
   assert.equal(streams.made.length, 1);
-  // it ends: back to the game that asked before; then nothing is left and the folder goes
   await ch.stop('g2');
-  await until(() => streams.made[0].calls.at(-1) === 'follow Bot_aaaa');
-  await ch.stop('g1');
   await until(() => ch.live().state === 'off');
   await until(() => !fs.existsSync(path.dirname(file)));
   assert.equal(ch.hlsFile('live.m3u8'), null);
@@ -162,7 +167,7 @@ test('MCP live_view (LIVE_VIEW=local): start_game says to get the link; live_vie
   assert.match(tools.tools.find((x) => x.name === 'live_view').description, /link of its watch page/);
   const s = (await c.callTool({ name: 'start_game', arguments: {} })).content[0].text;
   const game = /game (g\w+)/.exec(s)[1];
-  assert.ok(s.endsWith(`\n\n${LOCAL_NEXT}`));
+  assert.ok(s.startsWith(`${LOCAL_NEXT}\n\n`), 'the first line, before the game');
   state.value = { fb: false, channel: 'local', state: 'live', game, liveSince: '2026-10-13T10:00:00.000Z', aspect: '1080/1080' };
   const r = await c.callTool({ name: 'live_view', arguments: {} });
   assert.deepEqual(asked, [game], 'the camera was pointed at the game');
@@ -237,7 +242,7 @@ test('watch page: the page with its CSP, the scripts from this server, the statu
   state.value = { ...state.value, game: 'gother1' };
   await sleep(1_100);
   assert.equal((await fetch(`${url}${base}hls/live.m3u8`)).status, 404);
-  assert.match((await status()).text, new RegExp(`^The camera is on another game now\\. A live_view call in game ${game} brings it back here\\.`));
+  assert.match((await status()).text, new RegExp(`^The camera is on another game now\\. Game ${game} gets it when its turn comes`));
   // the camera page under the watch key (WATCH_KEY, here derived from the access key): whatever the camera films; the
   // access key itself is no watch link (a shared watch link must never let anyone play)
   const WK = watchKeyOf(KEY);
@@ -475,6 +480,7 @@ test('local channel: a camera move records the first segment of the new game\'s 
     assert.equal(ch.live().fromSeg, 0, 'the first game: every segment is its own');
     assert.equal(ch.live().lastSeg, 1700000000);
     ch.focus('g2');
+    await ch.stop('g1'); // its turn: the game that had the camera ended
     await until(() => ch.live().game === 'g2');
     assert.equal(ch.live().fromSeg, 1700000002, 'after the segment being written when the camera moved');
   } finally {
