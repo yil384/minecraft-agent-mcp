@@ -37,8 +37,9 @@ assets; the setup downloads what it needs from the original sources and checks e
 - [Connect a client](#connect-a-client): Claude Code, Claude Desktop, muse.ai, IDEs, any other MCP client
 - [Server on another machine](#server-on-another-machine) (a home server, a VPS, a lab box)
 - [Making the URL public](#making-the-url-public) (for clients that run in the cloud)
-- [The one-line prompt, goals and reports](#the-one-line-prompt-goals-and-reports)
-- [Who decides what: advise mode, reflexes and the HUD](#who-decides-what-advise-mode-reflexes-and-the-hud)
+- [Hosting a public server](#hosting-a-public-server) (other people's agents play on yours)
+- [The one-sentence prompt, goals and reports](#the-one-sentence-prompt-goals-and-reports)
+- [Who decides what: the agent's rules, advice and the HUD](#who-decides-what-the-agents-rules-advice-and-the-hud)
 - [Limits, and why they are there](#limits-and-why-they-are-there)
 - [Troubleshooting](#troubleshooting)
 - [Third-party software](#third-party-software), [Licence](#licence)
@@ -57,16 +58,21 @@ your MCP client ──MCP (streamable HTTP)──► agent ──► one bot per
                                                  └─ facebook: RTMPS ──► a live video on your profile or Page
 ```
 
-- **The MCP tools**: `start_game` (optionally with a goal), `play` and `play_sequence` (skills, one or several in a
-  row, with `why` and `plan`), `get_state`, `stop`, `set_goal`, `game_report`, `end_game`, `live_view`. Two ready
-  prompts: `play_to_the_nether`, `free_play`. Every reply carries the results and the new state within 45 s; long
-  skills keep running and later replies report them. Calls are checked before they run (missing items, bad arguments).
+- **The MCP tools**: `start_game` (optionally with a goal, the agent's rules, or `live: false`), `play` and
+  `play_sequence` (skills, one or several in a row, with `why` and `plan`), `get_state`, `stop`, `set_goal`,
+  `game_report`, `end_game`, `live_view`. Two ready prompts: `play_to_the_nether`, `free_play`. Every reply carries the
+  results and the new state within 45 s; long skills keep running and later replies report them. Calls are checked
+  before they run (missing items, bad arguments), and a refusal carries a typed code (`structuredContent.code`, such
+  as `NEED_ITEMS`, `NEED_LIVE_VIEW`, `SERVER_FULL`, `RATE_LIMITED`, `CLOSED`) so an agent knows what to do next.
 - **The body**: each game's bot runs in its own process: the MIT-licensed
   [Mine AI MCP](https://github.com/aibengineering/mine-ai-mcp) runtime at a pinned commit, with our patches
   (`mineai/`). It plays on a Paper 1.21.4 server in offline mode that only the stack itself can reach.
 - **The live view** (optional): a real Minecraft client, signed in with your own account, rides along with the bot
-  as a spectator; ffmpeg films it with a HUD that shows the agent's own why and plan, its calls, the body's advice and
-  reflexes, the goal and the items. One camera serves every game: it films the game whose `live_view` call came last.
+  as a spectator (over its shoulder, or through its own eyes where the only spot left would be inside its head); ffmpeg
+  films it with a HUD that shows the agent's own why and plan, its calls, the body's advice, the agent's rules as they
+  fire, the goal's splits and the items. One camera serves every game, **first come, first served**: it stays on a
+  game until that game ends (or makes no call for 5 minutes while others wait), and a game that asks meanwhile waits
+  in line, told its place and about how long. With a live view on, the agent opens it before it plays.
 
 ## Quick start
 
@@ -114,10 +120,13 @@ are enough for two bots). `live_view` says the live view is off.
   The camera draws on the CPU (about 4 cores and 1.5 GB while it films); with an NVIDIA GPU see
   [docs/CONFIG.md](docs/CONFIG.md#a-gpu-for-the-camera). Suggested: 8 cores, 12 GB of RAM.
 - The client is downloaded from Mojang at the camera's first start, into `./data/minecraft-client`.
-- `live_view` points the camera at the game and returns its watch page, `http://<your host>/live/<view id>/`: the game
-  and the HUD in a `<video>` element, about 5-8 s behind. A game's page shows only that game's picture. The page
-  under `/live/<WATCH_KEY>/` (`setup.sh` prints it) always shows whatever the camera films; a watch link never lets
-  anyone play.
+- `live_view` puts the game in line for the camera and returns its watch page, `http://<your host>/live/<view id>/`:
+  the game and the HUD in a `<video>` element, about 5-8 s behind. A game's page shows only that game's picture; while
+  another game has the camera it says the game's place in line, and it starts playing when the camera reaches the game.
+  The page under `/live/<WATCH_KEY>/` (`setup.sh` prints it) always shows whatever the camera films; a watch link never
+  lets anyone play.
+- With the live view on, `play` and `play_sequence` wait for `live_view` (code `NEED_LIVE_VIEW`): the user sees the
+  game from its first step. An agent whose user does not want to watch starts with `start_game` `live: false`.
 - If the camera account is not signed in, the watch page, `live_view` and `./setup.sh --status` say so; sign it in
   with `./setup.sh --camera-login`.
 
@@ -143,10 +152,19 @@ nothing served by your machine, so this is the way to see the game inside such a
 
 `setup.sh` asks for the App ID, then the App Secret and the token without echoing them, and writes a long-lived token
 to `./secrets/fb-token` (mode 600). A profile's token lasts about 60 days: run `./setup.sh --facebook` again before it
-runs out. Live videos start only when a client calls `live_view`, end when the last game that asked for them ends,
-and on a profile are deleted 10 minutes later. At most `FB_MAX_PER_HOUR` (4) and `FB_MAX_PER_DAY` (12) live videos
-are started: Facebook may lock an account that starts many automated public live videos in a short time (an identity
-check, "API access blocked"), so keep these low. The check script never uses a live video.
+runs out. Live videos start only when a client calls `live_view`. Each game the camera films gets a live video of its
+own: it ends when the game ends (or the camera moves on to the next game in line), and on a profile it is deleted 10
+minutes later. At most `FB_MAX_PER_HOUR` (4) and `FB_MAX_PER_DAY` (12) live videos are started: Facebook may lock an
+account that starts many automated public live videos in a short time (an identity check, "API access blocked"), so
+keep these low; when a cap holds, `live_view` says until when, and the game is still filmed for the recording if
+`RECORD` is on.
+The check script never uses a live video.
+
+The page `live_view` returns (about 2 KB, for a preview panel) shows a poster at once (with your logo if `STREAM_LOGO`
+is on), then Facebook's player, muted, reloaded quietly every few minutes. While the game waits in line it shows its
+place and swaps the player in when the camera arrives. When the game ends it asks this server (an image, since a
+preview panel allows no fetch), and the player gives way to the game's end card: the goal, the time, deaths and who
+acted.
 
 ## Connect a client
 
@@ -185,6 +203,10 @@ The stdio bridge in a desktop client's config:
 The HUD names the player by the name its MCP client reports (`clientInfo.name`, in capitals), so a viewer can tell
 who sent which words.
 
+Opening the MCP URL in a browser shows a short page instead of an error: what the address is, the one sentence to send
+an agent, and how to add it to a client (MCP clients never get it: it answers only a browser's `GET` that asks for
+HTML).
+
 ## Server on another machine
 
 The port is published on the server's own `127.0.0.1`, so from your laptop neither the MCP URL nor the watch page opens
@@ -219,43 +241,116 @@ against DNS rebinding; other names get `421`). Set `WEB_PUBLIC_URL` to your stab
 replies use it. Without it, links follow the host each request came in on (through the tunnel, the tunnel's name; on
 this machine, `127.0.0.1` and the published port). Read [SECURITY.md](SECURITY.md) before you expose the server.
 
-## The one-line prompt, goals and reports
+## Hosting a public server
 
-The server's instructions (sent at `initialize`) carry every standing rule, so one line is enough:
+Once the URL is public and you hand it out (or publish it), other people's agents play on your server. Everything
+below is a setting in `.env`; the defaults suit one person.
+
+- **Your own key**: set `MCP_OWNER_KEY` (16 or more letters, digits, `_` or `-`, different from the access key) and
+  add `?owner=<key>` to the MCP URL in your own client (or send it as the header `X-Owner-Key`). Your games go first
+  in line for the camera and for a bot, play while public play is off, may use `say`, and are held to none of the
+  per-address limits or bans. Never publish it.
+- **Open or closed**: `PUBLIC_PLAY=false` (or `POST /admin/public` with `{"on": false}`, at once and without a
+  restart) closes the server to new games: `start_game` answers `CLOSED` to everyone but you; games already running go
+  on. `PUBLIC_CHAT=false` keeps `say` (in-game chat) to you; other agents' words still reach viewers through their
+  `why` and `plan`.
+- **Limits per address**: MCP sessions (`MCP_SESSIONS_PER_ADDRESS`, 20), games held at once
+  (`WEB_MCP_GAMES_PER_ADDRESS`), new games an hour (`WEB_MCP_STARTS_PER_HOUR`, 10), and requests a session may send in
+  a minute (`WEB_MCP_REQUESTS_PER_MINUTE`, 120). Over a limit, `start_game` answers `RATE_LIMITED` with
+  `retryAfterS`; with every bot in use, `SERVER_FULL` with a place in the queue. Agents that run in a provider's cloud
+  can share a few addresses among many users, so do not set the per-address limits too low, and set `WEB_TRUST_PROXY`
+  to match your tunnel or proxy so the server sees real addresses.
+- **Words on screen**: every string an agent sends (its `why` and `plan`, its goal, `say`'s text, any argument) and its
+  client's name go through a word filter before anything keeps or shows them: offensive words become `[removed]`, also
+  through the usual disguises (`sh1t`, `f u c k`, `f*ck`), and the log counts how many. It uses the English
+  [LDNOOBW](https://github.com/LDNOOBW/List-of-Dirty-Naughty-Obscene-and-Otherwise-Bad-Words) list (CC BY 4.0,
+  `src/moderation/`) and is always on. Nothing an agent sends runs as code or as a console command.
+- **No addresses on screen or in the log**: games, bans and log rows carry a 12-character keyed hash of the address
+  (the key is `WEB_IP_SALT`, or derived from `WEB_ADMIN_TOKEN`).
+- **The admin routes** (with `WEB_ADMIN_TOKEN` as a Bearer token; five wrong tokens lock an address out for an hour):
+
+  | Route | What |
+  | --- | --- |
+  | `GET /admin/games` | public play on or off, every game (its id, address hash, caller, goal, status, age, time left), the queue for a bot, the bans |
+  | `POST /admin/end` `{"game": "g1a2b3c"}` | end one game |
+  | `POST /admin/ban` `{"ip": "<hash>", "hours": 24}` | ban an address hash (no `hours`: until unbanned) and end its games; kept across restarts in `./data/mineai/bans.json`. `WEB_BANNED_IPS` lists more |
+  | `POST /admin/unban` `{"ip": "<hash>"}` | lift a ban |
+  | `POST /admin/public` `{"on": false}` | close to new games (or open again) at once |
+  | `POST /admin/stop` | stop every running skill and clear the queue; `{"end": true}` also ends every game |
+  | `GET /log?n=50` | the game log's last rows, with every key scrubbed |
+
+  ```sh
+  curl -s -H "Authorization: Bearer $WEB_ADMIN_TOKEN" http://127.0.0.1:8787/admin/games
+  curl -s -H "Authorization: Bearer $WEB_ADMIN_TOKEN" -H 'content-type: application/json' \
+    -d '{"ip": "3f9c0a1b2d4e", "hours": 24}' http://127.0.0.1:8787/admin/ban
+  ```
+- **The camera** films one game at a time, first come, first served, so with many players most games wait in line or
+  are never filmed; the game on camera gives it to the next after 5 minutes without a call. Your own games (the
+  owner's key) go first; this project's check scripts go last and never start a Facebook live (`MCP_TEST_LIVE`).
+- **Recordings**: `RECORD=true` keeps every filmed game for films made later (the clean game, the stream as it went
+  out, the HUD's timeline), in `./data/recordings`, with old ones removed by age and total size
+  ([docs/CONFIG.md](docs/CONFIG.md#recordings)).
+
+Read [SECURITY.md](SECURITY.md) before you open the server to everyone.
+
+## The one-sentence prompt, goals and reports
+
+The server's instructions (sent at `initialize`) carry every standing rule, so one sentence is enough. To an agent
+that can add an MCP server from a URL in the chat:
 
 ```
-Play Minecraft with the minecraft tools and get to the Nether and back.
+Play Minecraft on https://<your host>/mcp/<key> and get to the Nether and back.
 ```
+
+To a client that already has the server added: `Play Minecraft with the minecraft tools and get to the Nether and
+back.` The ready prompts `play_to_the_nether` and `free_play` say the same.
 
 Other goals: `get an iron pickaxe`, `get diamonds`, `get to the Nether`, `just play`, or your own words, which the
 server counts when it can: "kill 100 pigs", "collect 64 cobblestone", "craft 20 torches", "reach y -59", "build a hut",
 "survive 2 nights", several joined with "and". A new goal mid-game goes through `set_goal`. The agent plays by itself:
-it starts the game with the goal, opens the live view, says why and what next with every call, and calls `end_game`,
-whose reply is the report: the goal, milestones with their times, deaths with their causes, who acted, and a decision
-log from the agent's whys and the advice it followed or declined. `game_report` gives the same during the game.
+it starts the game with the goal and its rules, opens the live view, says why and what next with every call, and
+calls `end_game`, whose reply is the report: the goal, milestones with their times, deaths with their causes, who
+acted, and a decision log from the agent's whys and the advice it followed or declined. `game_report` gives the same
+during the game.
+
+The server keeps an agent on track without playing for it: a reply reminds an agent that sends no `why` and `plan`,
+or has not opened the live view yet; the "Body advice" says when the same step has made no progress for a few calls
+(STUCK: what is stuck, the likely cause and what else to try, with a call that would do it), when the game's time is
+running out with the goal far (TIME), and what the route to the Nether still needs (the iron for a bucket and a flint
+and steel, the obsidian for a frame) before the agent finds out the hard way.
 
 Skills (with `BODY=mineai`): get_state, go_to, collect, craft, smelt, place, build, attack, eat, say, craft_batch,
 equip, hunt, sleep, bucket, chest, explore, policy, shelter, shield, portal, armor, pick_up, drop.
 
-## Who decides what: advise mode, reflexes and the HUD
+## Who decides what: the agent's rules, advice and the HUD
 
 The agent is the player, and the server says honestly what it did and what the body did on its own.
 
-- **Advise mode** (`BOT_CARE=advise`, the default): the agent plans everything. The body acts by itself only through
-  its reflexes: it fights back or flees when attacked, eats only when starving (food 4 or less), surfaces for air,
-  leaves fire and lava, and gets its footing back. The `policy` skill switches each of them. Every reply carries
-  "Body advice": what needs doing that the body will not do by itself (night coming with no shelter or shield, low
-  food, a tool about to break, items to recover after a death), with the facts and the skill that would do it;
-  following it or not is the agent's decision. `BOT_CARE=full` lets the body also shelter, eat, hunt and craft spares
-  between calls (for casual play); `off` leaves only the reflexes, as they come.
-- **Attribution**: every reply says what the reflexes did (`structuredContent.onItsOwn`), including a reflex that took
-  the body over in the middle of a step; `get_state` and `end_game` count who acted this game
-  (`structuredContent.attribution`: the agent's actions, the reflexes', the body's own plans).
-- **The HUD's colours**: violet is the agent's own words and orders (its why and plan, its calls, as sent), amber is the
-  body (its reflexes and its own actions), blue is the world and the server (milestones, the time of day), green and red
-  are results. The caller label is the MCP client's own name; this project's own check scripts (MCP client names
+- **The agent's rules** (`BOT_CARE=advise`, the default): the body does nothing by itself, not even between calls,
+  except by rules the agent sets. There are four: `defend` (fight back, raise the shield, wall in when badly hurt),
+  `flee` (withdraw from a hostile mob), `escape` (out of water for air, out of fire and lava, footing back after a
+  hit) and `eat_below N` (eat the best food carried at food N or less). **Every game starts with all of them off**;
+  the agent sets them with `start_game` (`rules: {"defend": true, "escape": true, "eat_below": 6}`) or the `policy`
+  skill at any time. A rule acts within a second, where a call takes seconds to minutes, so the server tells the
+  agent what each one costs or saves and leaves the choice to it. What a rule does counts as decided by the agent.
+- **Body advice**: every reply says what needs doing that the body will not do by itself (night coming with no
+  shelter or shield, low food, a tool about to break, items to recover after a death, a step that is stuck, time
+  running out), with the facts and the skill that would do it. It is information: following it or not is the agent's
+  decision. `BOT_CARE=full` instead lets the body also shelter, eat, hunt and craft spares between calls (for casual
+  play); `off` leaves only the runtime's own reflexes, as they come.
+- **Attribution**: every reply says what the body did outside the agent's calls (`structuredContent.onItsOwn`),
+  including a rule or reflex that took the body over in the middle of a step. `get_state` and `end_game` count who
+  acted this game in three parts (`structuredContent.attribution`): **direct** (the agent's own skills), **rules**
+  (actions under the agent's rules, by rule) and **body** (the body on its own: a reflex whose rule is off, or its own
+  plans in full mode); `decidedPct` is direct plus rules.
+- **The HUD** (`STREAM_HUD=b`, the default, a "speedrun broadcast"): over the video, each command pops up as a toast
+  with the agent's own why, what the bot gains floats up, the agent's rules show over the hotbar when they fire, and
+  a banner marks a new goal, a split or a death. Under the video: health, food, time of day and who acted (the caller,
+  RULE, BOT), the command with its why and plan, the goal as splits with their times, the last events (STUCK and TIME
+  advice first) and the raw MCP calls. `STREAM_HUD=final` is the earlier, denser design. Violet is the agent's own
+  words and orders, amber what its rules did, grey what the body did on its own, teal hints, green and red results. The caller label is the MCP client's own name; this project's own check scripts (MCP client names
   `self-check`, `*-smoke`, `e2e-*`) show as TEST SCRIPT. The HUD never puts a client's name on words that client did
-  not send; captions say "The agent: ..." or "Reflex: ...".
+  not send. A logo of your own can sit at the top right (`STREAM_LOGO`, `STREAM_LOGO_FILE`; off by default).
 
 ## Limits, and why they are there
 
@@ -265,10 +360,11 @@ Every limit is a setting in `.env`, with a default sized for one person on their
 | --- | --- | --- |
 | `MAX_GAMES` | 2 | each game's bot is a process of 0.3-1 GB of RAM |
 | `GAME_LEASE_MIN`, `GAME_IDLE_MIN` | 60, 10 | a game nobody plays any more frees its bot |
-| one camera | 1 | the camera is one Minecraft client signed in with one account (a second client would kick the first), and it costs about 4 cores while it films; it films the game whose `live_view` came last |
-| `FB_MAX_PER_HOUR`, `FB_MAX_PER_DAY` | 4, 12 | Facebook may lock an account that starts many automated public live videos in a short time |
+| one camera | 1 | the camera is one Minecraft client signed in with one account (a second client would kick the first), and it costs about 4 cores while it films; first come, first served: a game keeps it until it ends or makes no call for 5 minutes while others wait |
+| `FB_MAX_PER_HOUR`, `FB_MAX_PER_DAY` | 4, 12 | Facebook may lock an account that starts many automated public live videos in a short time (each filmed game has a live video of its own) |
 | a Page's age | 60 days | Facebook's rule for going live through the API; use your profile until then |
 | `MCP_SESSIONS`, `MCP_SESSIONS_PER_ADDRESS` | 200, 20 | MCP connections held open |
+| `WEB_MCP_STARTS_PER_HOUR`, `WEB_MCP_REQUESTS_PER_MINUTE` | 10, 120 | new games per address an hour, and calls per MCP session a minute: a runaway agent cannot take every bot or flood the server ([Hosting a public server](#hosting-a-public-server)) |
 
 ## Troubleshooting
 
@@ -315,4 +411,7 @@ Running without Docker (development, or a Mac without Docker): see
 
 Copyright 2026 Picasso Lab, UC San Diego. Apache License 2.0 ([LICENSE](LICENSE)), except: the patches to Mine AI MCP in `mineai/patches` are MIT
 ([mineai/LICENSE](mineai/LICENSE)); the fonts in `assets/ui/fonts` are under the SIL Open Font License 1.1; the music
-bed is CC0 1.0. See [NOTICE](NOTICE) and [assets/ui/CREDITS.txt](assets/ui/CREDITS.txt).
+bed is CC0 1.0; the word list in `src/moderation` is LDNOOBW's, CC BY 4.0. **The Picasso Lab logo in `assets/brand` is
+not covered by the Apache License or any other licence here**: it is included only for this project's own optional
+logo (`STREAM_LOGO`, off by default); use your own (`STREAM_LOGO_FILE`) on your server. See [NOTICE](NOTICE) and
+[assets/ui/CREDITS.txt](assets/ui/CREDITS.txt).

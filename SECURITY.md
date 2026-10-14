@@ -30,6 +30,14 @@ The agent refuses to start without a key when it listens on anything but loopbac
 that came through a proxy or tunnel (it carries `X-Forwarded-For`, `CF-Connecting-IP`, `Forwarded`, `X-Real-IP` or
 `X-Forwarded-Host`) is refused, and so is any request for a host name other than `localhost` or a loopback address.
 
+## The owner's key
+
+`MCP_OWNER_KEY` (optional) is a second key, for you alone, on top of the access key: a connection that brings it
+(`?owner=<key>` on the MCP URL, or the header `X-Owner-Key`) goes first in line for the camera and for a bot, plays
+while public play is off, may use `say`, and is held to no per-address limit or ban. It must differ from the access
+key (the agent refuses to start otherwise), is compared in constant time and is never logged. Keep it out of any URL
+you share, and change it if it leaks.
+
 ## Host names and other websites (DNS rebinding)
 
 A web page you visit could point a name of its own at your machine's address and then talk to the server as if it
@@ -59,14 +67,29 @@ the port anywhere (in Docker there is always one).
   sees or forwards never lets them play.
 - Keep `WEB_GUEST_PAGES=off` (the default) unless you want anyone who reaches the port to start bots from the zero-JS
   pages (`/play`, `/api`).
-- `/log` and `/admin/stop` exist only with `WEB_ADMIN_TOKEN` and need it as a Bearer token; five wrong tokens lock an
-  address out for an hour.
+- `/log` and the `/admin/*` routes (games, end, ban, unban, public, stop) exist only with `WEB_ADMIN_TOKEN` and need
+  it as a Bearer token; five wrong tokens lock an address out for an hour. With no `WEB_ADMIN_TOKEN` set they answer 404.
+
+## Sharing the server with everyone
+
+When you publish the MCP URL, anyone's agent can play (README, "Hosting a public server"):
+
+- Every string an agent sends (its `why` and `plan`, its goal, `say`'s text, every argument) and its client's name are
+  cleaned by a word filter before anything keeps or shows them; offensive words become `[removed]`. It cannot catch
+  everything: the HUD shows only what an agent sent, under that client's own name, never as yours.
+- `PUBLIC_CHAT=false` keeps in-game chat to your own key; `PUBLIC_PLAY=false` (or `POST /admin/public`) closes the
+  server to new games at once.
+- Per address: MCP sessions, games held at once, new games an hour; per session: requests a minute. Behind a tunnel or
+  proxy, set `WEB_TRUST_PROXY` so these see real addresses.
+- Addresses are shown and logged only as 12-character keyed hashes (`WEB_IP_SALT`, or derived from the admin token);
+  `POST /admin/ban` bans a hash (and ends its games), kept across restarts.
 
 ## Limits
 
 `MAX_GAMES` bots at once, `GAME_LEASE_MIN` per game, `GAME_IDLE_MIN` without calls, MCP sessions in all and per
-address, new sessions and game starts per address per hour, a 64 KiB cap on an MCP request and 8 KiB on a form, and on
-the live views a cap on open connections per address. With `LIVE_VIEW=facebook`, `FB_MAX_PER_HOUR` and
+address, MCP games held per address, new sessions and game starts per address per hour (`WEB_MCP_STARTS_PER_HOUR`),
+requests per MCP session per minute (`WEB_MCP_REQUESTS_PER_MINUTE`), a 64 KiB cap on an MCP request and 8 KiB on a
+form, and on the live views a cap on open connections per address. With `LIVE_VIEW=facebook`, `FB_MAX_PER_HOUR` and
 `FB_MAX_PER_DAY` cap the live videos started: Facebook may lock an account that starts many automated public live
 videos in a short time.
 
@@ -74,16 +97,17 @@ videos in a short time.
 
 | Secret | Where | Protection |
 | --- | --- | --- |
-| `MCP_ACCESS_KEY`, `WATCH_KEY`, `WEB_ADMIN_TOKEN`, `WEB_PROXY_SECRET` | `.env` (mode 600) | passed to the agent only (compose.yaml blanks them for the camera); never logged; never handed to a child process (a bot's runtime, ffmpeg, the X server, the game client) |
+| `MCP_ACCESS_KEY`, `MCP_OWNER_KEY`, `WATCH_KEY`, `WEB_ADMIN_TOKEN`, `WEB_PROXY_SECRET`, `WEB_IP_SALT` | `.env` (mode 600) | passed to the agent only (compose.yaml blanks them for the camera); never logged; never handed to a child process (a bot's runtime, ffmpeg, the X server, the game client) |
 | `STREAM_SERVICE_TOKEN` | `.env` (mode 600) | shared by the agent and the camera service; the camera's control API answers no request without it; never logged |
 | The camera's Microsoft and Minecraft tokens | `./data/camera-auth` (700, files 600) | refreshed silently; the token reaches the game client through its environment, never its command line |
 | The Facebook token | `./secrets/fb-token` (600) | read by the camera only, sent only in the Authorization header to graph.facebook.com, scrubbed from every error |
 | Stream keys (RTMPS ingest URLs) | memory only | never on a command line (ffmpeg writes to a pipe; src/rtmp.js publishes), masked in logs |
 | Each bot's runtime token | memory and its process's environment | one per host, loopback only |
 
-The game log (`./data/logs`) holds the calls with short summaries of their arguments, the agent's why texts, results
-and times, and the MCP client's name and version; no tokens, no keys and no network addresses (a peer that a proxy
-check is about is written as a short keyed hash and its kind: local, private or public).
+The game log (`./data/logs`) holds the calls with short summaries of their arguments, the agent's why texts (after the
+word filter), results and times, and the MCP client's name and version; no tokens, no keys and no network addresses
+(a game's address, and a peer that a proxy check is about, are written as a short keyed hash). Recordings
+(`RECORD=true`, `./data/recordings`) hold the game's picture and sound and the HUD's text, nothing else.
 
 ## Containers
 
