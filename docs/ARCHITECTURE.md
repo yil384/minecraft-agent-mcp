@@ -58,8 +58,10 @@ to the service carries `STREAM_SERVICE_TOKEN`.
 A **channel** decides what the camera films: only games whose `live_view` asked, first come, first served. The game on
 camera keeps it until it ends, or until it has made no call for 5 minutes while others wait; the others wait in line
 in the order of their first `live_view` (the owner's games first, a check script's last), and each is told its place
-and an estimate from the games ahead and their leases. Two channels share that behaviour and the HUD keeping
-(`src/live-terms.js`: each game's HUD state, kept while it is off camera and drawn again when the camera reaches it):
+and an estimate from the games ahead and their leases. A game higher in that order does not wait: the owner's game
+takes the camera from a player's at once (the player's live video ends and its game waits in line again), and a
+player's game from a check script's. Two channels share that behaviour and the HUD keeping (`src/live-terms.js`:
+each game's HUD state, kept while it is off camera and drawn again when the camera reaches it):
 
 - **local** (`src/live-local.js`): ffmpeg writes HLS (one 2 s segment per keyframe interval, six kept, numbered from
   the clock) into a folder of the camera's tmpfs; the service serves those files on loopback (`GET /hls/<file>`, names

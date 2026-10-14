@@ -241,6 +241,20 @@ test('say with PUBLIC_CHAT off (a public server; on by default): a guest\'s chat
   assert.equal((await r.json()).code, 'NOT_ALLOWED');
 });
 
+test('the guest form and /api: their words go through the same word filter as MCP calls', async (t) => {
+  const { url, bodies } = await serve(t);
+  const { page, token } = await guest(url);
+  const body = [...bodies.values()][0];
+  await post(`${page}/say`, { text: 'what a dick move' });
+  assert.equal(body.calls.at(-1).args.text, 'what a [removed] move');
+  const r = await call(`${url}/api/${token}/say`, 'POST', { text: 'dick' });
+  assert.equal(r.status, 200);
+  assert.equal(body.calls.at(-1).args.text, '[removed]');
+  assert.equal((await r.json()).args.text, '[removed]');
+  await post(`${page}/say`, { text: 'hello there' });
+  assert.equal(body.calls.at(-1).args.text, 'hello there', 'ordinary words pass as typed');
+});
+
 test('escaping: state, results, chat and notices are shown as text, never as markup', async (t) => {
   const evil = '<script>alert(1)</script> & "q" \'a\'';
   const { url, bodies } = await serve(t, { bodyOpts: { state: evil } });

@@ -634,9 +634,8 @@ function drawRaw(M) {
   }
 }
 // a logo at the top right of the video (STREAM_LOGO, off by default; STREAM_LOGO_FILE its PNG): 'plain', a
-// transparent light logo drawn as it is, at most 240 x 100, with a hard dark shadow 2 px down (no blur); by default the
-// project's pixel logo (assets/brand/picasso-lab-pixel-230.png, 230 x 57, not under the Apache licence: NOTICE); or
-// 'card', a light logo on a white card (radius 10, 7 px around, a 1 px dark edge, no blur) at 92 %.
+// transparent light logo drawn as it is, at most 240 x 100, with a hard dark shadow 2 px down (no blur), such as a
+// 230 x 57 pixel logo; or 'card', a light logo on a white card (radius 10, 7 px around, a 1 px dark edge, no blur) at 92 %.
 // 16 px in from the corner, above the toasts' band (from y 136) and away from Facebook's LIVE badge (top left)
 export const LOGO = { right: 1064, y: 16, pad: 7, alpha: 0.92, maxW: 160, maxWPlain: 240, maxH: 100 };
 // a large image down to w x h in halves (a single big step aliases the fine lines)

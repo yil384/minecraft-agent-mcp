@@ -259,14 +259,15 @@ test('HUD B: a refused command gets no toast (its row says why); a frame is writ
   assert.ok(g.model().feed.some((r) => r.code === 'NO' && r.result === 'NEED_LIVE_VIEW'));
 });
 
-test('HUD B: the lab\'s logo (STREAM_LOGO): off by default; on a white card, or a transparent light one drawn as it is with a hard shadow; top right, clear of the toasts\' band and the LIVE badge', () => {
+test('HUD B: the operator\'s logo (STREAM_LOGO, STREAM_LOGO_FILE): off by default, none without a file; on a white card, or a transparent light one drawn as it is with a hard shadow; top right, clear of the toasts\' band and the LIVE badge', () => {
   const frame = (logo) => {
     const p = createUiPanel({ width: 1080, height: 472, over: 608, now: () => 1_000_000, ...(logo ? { logo } : {}) });
     const c = p.render(1_000_000).getContext('2d');
     return (x, y) => [...c.getImageData(x, y, 1, 1).data];
   };
   assert.equal(frame(null)(1000, 40)[3], 0, 'off by default');
-  const card = frame({ style: 'card' });
+  assert.equal(frame({ style: 'card' })(1000, 22)[3], 0, 'no file: no logo (there is no default)');
+  const card = frame({ style: 'card', file: 'brand/picasso-lab-pixel-230.png' });
   assert.ok(card(1000, 22)[3] > 200 && card(1000, 22)[0] > 200, 'the white card');
   assert.equal(card(1000, 126)[3], 0, 'nothing between it and the toasts');
   assert.equal(card(60, 40)[3], 0, 'nothing at the top left (Facebook\'s LIVE badge)');
@@ -281,15 +282,16 @@ test('HUD B: the lab\'s logo (STREAM_LOGO): off by default; on a white card, or 
   assert.equal(plain(870, 22)[3], 0, 'no card around it');
   const sh = plain(960, 84); assert.ok(sh[3] > 0 && sh[0] < 60, 'its hard shadow 2 px down');
   fs.rmSync(dir, { recursive: true, force: true });
-  // plain with no file: the project's pixel logo (assets/brand), 230 x 57 at the top right from y 16
-  const pix = frame({ style: 'plain' });
+  // a pixel logo of 230 x 57 (the one in assets/brand), plain: at the top right from y 16
+  const pix = frame({ style: 'plain', file: 'brand/picasso-lab-pixel-230.png' });
   let seen = 0;
   for (let x = 840; x < 1064; x += 7) for (let y = 18; y < 84; y += 5) if (pix(x, y)[3] > 200) seen += 1;
   assert.ok(seen > 50, `the pixel logo in 834..1064 x 16..73 (${seen} samples)`);
   for (const [x, y] of [[1064 - 233, 50], [950, 87], [950, 14]]) assert.equal(pix(x, y)[3], 0, `nothing at ${x},${y}`);
   assert.equal(pix(1000, 126)[3], 0);
   assert.equal(loadConfig({}).stream.logo, 'off');
-  assert.equal(loadConfig({ STREAM_LOGO: 'plain', STREAM_LOGO_FILE: 'lab-logo-white.png' }).stream.logoFile, 'lab-logo-white.png');
+  assert.equal(loadConfig({ STREAM_LOGO: 'plain', STREAM_LOGO_FILE: 'brand/mine.png' }).stream.logoFile, 'brand/mine.png');
+  assert.throws(() => loadConfig({ STREAM_LOGO: 'card' }), /STREAM_LOGO needs STREAM_LOGO_FILE/);
 });
 
 test('HUD B: the model reads the state as the panel builds it (fixture: the long sample)', () => {

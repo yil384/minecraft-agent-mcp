@@ -187,10 +187,10 @@ export function createUiPanel(o) {
   try { for (const f of fs.readdirSync(path.join(assets, 'icons'))) if (f.endsWith('.png')) { const im = new Image(); im.src = fs.readFileSync(path.join(assets, 'icons', f)); images[f.slice(0, -4)] = im; } } catch { /* drawn without */ }
   // a logo for the top right of the video (concept B; the stream only, never the clean recording; STREAM_LOGO, off
   // by default): o.logo {style: card | plain, file: a name in assets/ui, a path under assets/ or an absolute path};
-  // none without it. Without a file: the project's pixel logo (assets/brand/picasso-lab-pixel-230.png, NOTICE)
+  // none without it, and none without a file (there is no default logo: NOTICE)
   let logo = null;
-  if (o.logo && ['card', 'plain'].includes(o.logo.style)) {
-    const name = o.logo.file || 'brand/picasso-lab-pixel-230.png';
+  if (o.logo && ['card', 'plain'].includes(o.logo.style) && o.logo.file) {
+    const name = o.logo.file;
     const f = path.isAbsolute(name) ? name : name.includes('/') ? path.join(assets, '..', path.normalize(name).replace(/^(\.\.[/\\])+/, '')) : path.join(assets, name);
     try { const im = new Image(); im.src = fs.readFileSync(f); logo = { img: im, style: o.logo.style }; } catch { logo = null; }
   }

@@ -33,6 +33,7 @@ import { registryFor } from './mc.js';
 import { liveViewHtml, localViewHtml } from './live-page.js';
 import { createTermFeed, cutWords, callerOf } from './terminal.js';
 import { readFileSync } from 'node:fs';
+import { moderator } from './moderation.js';
 
 /** The server's name and version for MCP's initialize: package.json's, the one place they are written. */
 export const SERVER_INFO = Object.freeze((() => {
@@ -42,7 +43,6 @@ export const SERVER_INFO = Object.freeze((() => {
 
 /** Why the camera does not answer, for live_view: what the camera last said (v.reason), or a guess. */
 const downWords = (v) => (v?.reason ? `the camera is not running: ${String(v.reason).slice(0, 200)}.` : 'the camera does not answer (it may be starting, or stopped).');
-import { moderator } from './moderation.js';
 
 const CALL_MS = 45_000; // every reply within 45 s: MCP clients commonly give up after 60 s (a long skill keeps going)
 /** Of a call's time, what building the reply may take (the state text scans the blocks around: ~850 ms on Paper). */
@@ -1344,13 +1344,18 @@ export function createMcp(hooks) {
     return true;
   }
 
-  /** May this address open one more MCP session? null, or {status, message, headers}. */
+  /**
+   * May this address open one more MCP session? null, or {status, message, headers}. The owner (MCP_OWNER_KEY) is held
+   * to no ban and no per-address limit; the server's own cap on sessions holds for everyone.
+   */
   function admit(address, owner = false) {
-    if (!owner && safely(() => hooks.banned?.(address), false)) return { status: 403, message: 'this address may not play on this server' };
-    const limit = hooks.initLimiter?.take(address) ?? { ok: true };
-    if (!limit.ok) return { status: 429, message: `too many new MCP sessions from your address; try again in ${roughly(limit.retryMs)}`, headers: { 'retry-after': String(Math.ceil(limit.retryMs / 1000)) } };
-    const mine = [...sessions].filter(([, e]) => e.address === address);
-    if (mine.length >= limits.perAddress && !evictOne(mine)) return { status: 429, message: `your address already holds ${limits.perAddress} MCP sessions that play; end one (end_game) first` };
+    if (!owner) {
+      if (safely(() => hooks.banned?.(address), false)) return { status: 403, message: 'this address may not play on this server' };
+      const limit = hooks.initLimiter?.take(address) ?? { ok: true };
+      if (!limit.ok) return { status: 429, message: `too many new MCP sessions from your address; try again in ${roughly(limit.retryMs)}`, headers: { 'retry-after': String(Math.ceil(limit.retryMs / 1000)) } };
+      const mine = [...sessions].filter(([, e]) => e.address === address);
+      if (mine.length >= limits.perAddress && !evictOne(mine)) return { status: 429, message: `your address already holds ${limits.perAddress} MCP sessions that play; end one (end_game) first` };
+    }
     if (sessions.size >= limits.sessions && !evictOne([...sessions])) return { status: 503, message: 'the server holds as many MCP sessions as it can right now; try again in a few minutes' };
     return null;
   }

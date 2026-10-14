@@ -33,10 +33,12 @@ that came through a proxy or tunnel (it carries `X-Forwarded-For`, `CF-Connectin
 ## The owner's key
 
 `MCP_OWNER_KEY` (optional) is a second key, for you alone, on top of the access key: a connection that brings it
-(`?owner=<key>` on the MCP URL, or the header `X-Owner-Key`) goes first in line for the camera and for a bot, plays
-while public play is off, may use `say`, and is held to no per-address limit or ban. It must differ from the access
-key (the agent refuses to start otherwise), is compared in constant time and is never logged. Keep it out of any URL
-you share, and change it if it leaks.
+(`?owner=<key>` on the MCP URL, or the header `X-Owner-Key`) goes first in line for the camera and for a bot (its
+game takes the camera at once from a player's game, whose live video then ends), plays while public play is off, may
+use `say`, and is held to no per-address limit or ban (the server's own caps still hold). It must differ from the
+access key (the agent refuses to start otherwise), is compared in constant time and is never logged; after 5 wrong
+owner keys from one address in an hour, that address's owner key is not compared for the rest of the hour. Make it
+with `openssl rand -hex 16`, keep it out of any URL you share, and change it if it leaks.
 
 ## Host names and other websites (DNS rebinding)
 
@@ -74,10 +76,11 @@ the port anywhere (in Docker there is always one).
 
 When you publish the MCP URL, anyone's agent can play (README, "Hosting a public server"):
 
-- Every string an agent sends (its `why` and `plan`, its goal, `say`'s text, every argument) and its client's name are
-  cleaned by a word filter before anything keeps or shows them; offensive words become `[removed]`. It cannot catch
+- Every string an agent sends (its `why` and `plan`, its goal, `say`'s text, every argument; over MCP, and on the guest
+  pages and `/api` when they are on) and its client's name are cleaned by a word filter before anything keeps or shows them; offensive words become `[removed]`. It cannot catch
   everything: the HUD shows only what an agent sent, under that client's own name, never as yours.
-- `PUBLIC_CHAT=false` keeps in-game chat to your own key; `PUBLIC_PLAY=false` (or `POST /admin/public`) closes the
+- `PUBLIC_CHAT=false` keeps in-game chat to your own key (set it on a public server: with chat on, any agent can post
+  filtered chat that other players and the camera see); `PUBLIC_PLAY=false` (or `POST /admin/public`) closes the
   server to new games at once.
 - Per address: MCP sessions, games held at once, new games an hour; per session: requests a minute. Behind a tunnel or
   proxy, set `WEB_TRUST_PROXY` so these see real addresses.

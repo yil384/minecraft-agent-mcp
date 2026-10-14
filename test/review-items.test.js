@@ -1,4 +1,4 @@
-// test/prelaunch.test.js - open items from reviews of real games, closed before the release: a cancelled action that does not let go no longer holds the step past
+// test/review-items.test.js - open items from reviews of real games, closed before the release: a cancelled action that does not let go no longer holds the step past
 // a grace (F8 of 2026-10-12: 360 s over the limit), and obsidian already formed beside the bot is mined at its cells
 // when no lava pool is near (the guard's LAVA refusal used to stand in front of it).
 import test from 'node:test';
@@ -13,7 +13,7 @@ import { createLogger } from '../src/log.js';
 
 const sleep = (ms) => new Promise((r) => { setTimeout(r, ms); });
 const until = async (fn, ms = 6000) => { const end = Date.now() + ms; while (Date.now() < end) { if (await fn()) return true; await sleep(25); } return false; };
-const config = loadConfig({ LOG_DIR: fs.mkdtempSync(path.join(os.tmpdir(), 'prelaunch-')), MC_PORT: '25946' });
+const config = loadConfig({ LOG_DIR: fs.mkdtempSync(path.join(os.tmpdir(), 'review-items-')), MC_PORT: '25946' });
 const log = createLogger({ dir: null, config, keep: 500 });
 
 async function bodyOf(gameId, inventory, opts = {}) {

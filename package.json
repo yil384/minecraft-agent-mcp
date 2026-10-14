@@ -1,6 +1,6 @@
 {
   "name": "minecraft-agent-mcp",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "description": "A self-hosted MCP server that lets any MCP client play Minecraft: Java Edition through a bot, with an optional live view (a local watch page, or your own Facebook live). Not an official Minecraft product.",
   "license": "Apache-2.0",

@@ -704,7 +704,7 @@ test('MCP live_view, two players: the second is told its place in line (and its 
   const { fake, ch } = await channelOn(t);
   const dir = tmp();
   const KEY = 'ownerkey-0123456789abcdef';
-  const config = loadConfig({ WEB_HOST: '127.0.0.1', WEB_PORT: '0', LOG_DIR: dir, MCP_OWNER_KEY: KEY, STREAM_LOGO: 'plain', WEB_MAX_SESSIONS: '8', WEB_MCP_GAMES_PER_ADDRESS: '8' });
+  const config = loadConfig({ WEB_HOST: '127.0.0.1', WEB_PORT: '0', LOG_DIR: dir, MCP_OWNER_KEY: KEY, STREAM_LOGO: 'plain', STREAM_LOGO_FILE: 'brand/picasso-lab-pixel-230.png', WEB_MAX_SESSIONS: '8', WEB_MCP_GAMES_PER_ADDRESS: '8' });
   const agent = await startAgent({ config, fakeBot: true, print: () => {}, loadViewer: () => null, streams: ch, loopStatsMs: 0 });
   const clients = [];
   const connect = async (name, suffix = '') => { const c = new Client({ name, version: '1' }); clients.push(c); await c.connect(new StreamableHTTPClientTransport(new URL(`${agent.url}/mcp${suffix}`))); return c; };

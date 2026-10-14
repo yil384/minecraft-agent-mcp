@@ -126,6 +126,14 @@ test('public (PUBLIC_CHAT=off): say (in-game chat) is the owner\'s; an outside a
   assert.equal((await wrong.callTool({ name: 'play', arguments: { skill: 'say', args: { text: 'hi' } } })).structuredContent.code, 'NOT_ALLOWED');
 });
 
+test('wrong owner keys: after 5 from an address in an hour, its owner key is not even compared (it plays as anyone)', async (t) => {
+  const { client } = await serve(t);
+  for (let i = 0; i < 3; i++) await client({ key: `not-the-owner-key-${i}000000000000000` });
+  const late = await client({ key: OWNER });
+  await late.callTool({ name: 'start_game', arguments: { live: false } });
+  assert.equal((await late.callTool({ name: 'play', arguments: { skill: 'say', args: { text: 'hi' } } })).structuredContent.code, 'NOT_ALLOWED');
+});
+
 test('public limits: 3 games an address, 10 starts an hour, requests a minute per session, SERVER_FULL; the owner goes first', async (t) => {
   {
     const { client } = await serve(t, { env: { WEB_MAX_SESSIONS: '8' } });
@@ -258,7 +266,7 @@ test('a browser at the MCP URL gets a page for people (what it is, the one sente
   assert.doesNotMatch(page, /<img/, 'no logo with STREAM_LOGO off (the default)');
   assert.doesNotMatch(page, /[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}]/u, 'no emoji');
   // with STREAM_LOGO on: the logo inline (no request of its own)
-  const withLogo = await serve(t, { env: { STREAM_LOGO: 'plain' } });
+  const withLogo = await serve(t, { env: { STREAM_LOGO: 'plain', STREAM_LOGO_FILE: 'brand/picasso-lab-pixel-230.png' } });
   assert.match(await (await fetch(`${withLogo.url}/mcp`, { headers: browser })).text(), /<img class="brand" src="data:image\/png;base64,[A-Za-z0-9+/=]{1000,}" alt="" width="280">/);
   // MCP clients: the SDK's client plays as before
   const c = new Client({ name: 'player', version: '1' });
@@ -278,6 +286,8 @@ test('a browser at the MCP URL gets a page for people (what it is, the one sente
   const post = await fetch(`${url}/mcp/${KEY}`, { method: 'POST', headers: { ...browser, 'content-type': 'application/json' }, body: '{}' });
   assert.doesNotMatch(String(post.headers.get('content-type')), /text\/html/);
   await post.body?.cancel();
-  // no link when OPEN_SOURCE_URL is empty; a bad one is refused
+  // OPEN_SOURCE_URL: empty is this project, off no link; a bad one is refused
+  assert.equal(loadConfig({ OPEN_SOURCE_URL: '' }).web.openSourceUrl, 'https://github.com/yil384/minecraft-agent-mcp');
+  assert.equal(loadConfig({ OPEN_SOURCE_URL: 'off' }).web.openSourceUrl, '');
   assert.throws(() => loadConfig({ OPEN_SOURCE_URL: 'javascript:alert(1)' }), /OPEN_SOURCE_URL must be an https URL/);
 });

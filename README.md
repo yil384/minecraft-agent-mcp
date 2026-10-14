@@ -72,7 +72,8 @@ your MCP client ──MCP (streamable HTTP)──► agent ──► one bot per
   films it with a HUD that shows the agent's own why and plan, its calls, the body's advice, the agent's rules as they
   fire, the goal's splits and the items. One camera serves every game, **first come, first served**: it stays on a
   game until that game ends (or makes no call for 5 minutes while others wait), and a game that asks meanwhile waits
-  in line, told its place and about how long. With a live view on, the agent opens it before it plays.
+  in line, told its place and about how long. The server owner's own games (`MCP_OWNER_KEY`) are the exception: they
+  take the camera at once. With a live view on, the agent opens it before it plays.
 
 ## Quick start
 
@@ -161,10 +162,10 @@ keep these low; when a cap holds, `live_view` says until when, and the game is s
 The check script never uses a live video.
 
 The page `live_view` returns (about 2 KB, for a preview panel) shows a poster at once (with your logo if `STREAM_LOGO`
-is on), then Facebook's player, muted, reloaded quietly every few minutes. While the game waits in line it shows its
+and `STREAM_LOGO_FILE` are set), then Facebook's player, muted, reloaded quietly every few minutes. While the game waits in line it shows its
 place and swaps the player in when the camera arrives. When the game ends it asks this server (an image, since a
-preview panel allows no fetch), and the player gives way to the game's end card: the goal, the time, deaths and who
-acted.
+preview panel allows no fetch), and the player gives way to the game's end card: the goal, the time, the splits, who
+decided and why the game ended.
 
 ## Connect a client
 
@@ -248,12 +249,14 @@ below is a setting in `.env`; the defaults suit one person.
 
 - **Your own key**: set `MCP_OWNER_KEY` (16 or more letters, digits, `_` or `-`, different from the access key) and
   add `?owner=<key>` to the MCP URL in your own client (or send it as the header `X-Owner-Key`). Your games go first
-  in line for the camera and for a bot, play while public play is off, may use `say`, and are held to none of the
-  per-address limits or bans. Never publish it.
+  in line for the camera and for a bot (and take the camera at once from a player's game, whose live video then
+  ends), play while public play is off, may use `say`, and are held to none of the per-address limits or bans. Make
+  it with `openssl rand -hex 16` and never publish it.
 - **Open or closed**: `PUBLIC_PLAY=false` (or `POST /admin/public` with `{"on": false}`, at once and without a
   restart) closes the server to new games: `start_game` answers `CLOSED` to everyone but you; games already running go
   on. `PUBLIC_CHAT=false` keeps `say` (in-game chat) to you; other agents' words still reach viewers through their
-  `why` and `plan`.
+  `why` and `plan`. Set it on a public server: chat is on by default (it suits a server of your own), and with it on
+  any agent can post (filtered) chat that other players and the camera see.
 - **Limits per address**: MCP sessions (`MCP_SESSIONS_PER_ADDRESS`, 20), games held at once
   (`WEB_MCP_GAMES_PER_ADDRESS`), new games an hour (`WEB_MCP_STARTS_PER_HOUR`, 10), and requests a session may send in
   a minute (`WEB_MCP_REQUESTS_PER_MINUTE`, 120). Over a limit, `start_game` answers `RATE_LIMITED` with
@@ -266,7 +269,8 @@ below is a setting in `.env`; the defaults suit one person.
   [LDNOOBW](https://github.com/LDNOOBW/List-of-Dirty-Naughty-Obscene-and-Otherwise-Bad-Words) list (CC BY 4.0,
   `src/moderation/`) and is always on. Nothing an agent sends runs as code or as a console command.
 - **No addresses on screen or in the log**: games, bans and log rows carry a 12-character keyed hash of the address
-  (the key is `WEB_IP_SALT`, or derived from `WEB_ADMIN_TOKEN`).
+  (the key is `WEB_IP_SALT`, which `setup.sh` writes; keep it when you change the admin token, or every ban stops
+  matching).
 - **The admin routes** (with `WEB_ADMIN_TOKEN` as a Bearer token; five wrong tokens lock an address out for an hour):
 
   | Route | What |
@@ -286,7 +290,9 @@ below is a setting in `.env`; the defaults suit one person.
   ```
 - **The camera** films one game at a time, first come, first served, so with many players most games wait in line or
   are never filmed; the game on camera gives it to the next after 5 minutes without a call. Your own games (the
-  owner's key) go first; this project's check scripts go last and never start a Facebook live (`MCP_TEST_LIVE`).
+  owner's key) go first and take the camera at once: a player's game on air loses it (its live video ends, and it
+  waits in line again). This project's check scripts go last (a player's game takes the camera from theirs) and never
+  start a Facebook live (`MCP_TEST_LIVE`).
 - **Recordings**: `RECORD=true` keeps every filmed game for films made later (the clean game, the stream as it went
   out, the HUD's timeline), in `./data/recordings`, with old ones removed by age and total size
   ([docs/CONFIG.md](docs/CONFIG.md#recordings)).
@@ -350,7 +356,8 @@ The agent is the player, and the server says honestly what it did and what the b
   advice first) and the raw MCP calls. `STREAM_HUD=final` is the earlier, denser design. Violet is the agent's own
   words and orders, amber what its rules did, grey what the body did on its own, teal hints, green and red results. The caller label is the MCP client's own name; this project's own check scripts (MCP client names
   `self-check`, `*-smoke`, `e2e-*`) show as TEST SCRIPT. The HUD never puts a client's name on words that client did
-  not send. A logo of your own can sit at the top right (`STREAM_LOGO`, `STREAM_LOGO_FILE`; off by default).
+  not send. A logo of your own can sit at the top right (`STREAM_LOGO` with your PNG in `STREAM_LOGO_FILE`; off by default, and
+  there is no default logo).
 
 ## Limits, and why they are there
 
@@ -360,7 +367,7 @@ Every limit is a setting in `.env`, with a default sized for one person on their
 | --- | --- | --- |
 | `MAX_GAMES` | 2 | each game's bot is a process of 0.3-1 GB of RAM |
 | `GAME_LEASE_MIN`, `GAME_IDLE_MIN` | 60, 10 | a game nobody plays any more frees its bot |
-| one camera | 1 | the camera is one Minecraft client signed in with one account (a second client would kick the first), and it costs about 4 cores while it films; first come, first served: a game keeps it until it ends or makes no call for 5 minutes while others wait |
+| one camera | 1 | the camera is one Minecraft client signed in with one account (a second client would kick the first), and it costs about 4 cores while it films; first come, first served: a game keeps it until it ends or makes no call for 5 minutes while others wait (the owner's games take it at once) |
 | `FB_MAX_PER_HOUR`, `FB_MAX_PER_DAY` | 4, 12 | Facebook may lock an account that starts many automated public live videos in a short time (each filmed game has a live video of its own) |
 | a Page's age | 60 days | Facebook's rule for going live through the API; use your profile until then |
 | `MCP_SESSIONS`, `MCP_SESSIONS_PER_ADDRESS` | 200, 20 | MCP connections held open |
@@ -412,6 +419,6 @@ Running without Docker (development, or a Mac without Docker): see
 Copyright 2026 Picasso Lab, UC San Diego. Apache License 2.0 ([LICENSE](LICENSE)), except: the patches to Mine AI MCP in `mineai/patches` are MIT
 ([mineai/LICENSE](mineai/LICENSE)); the fonts in `assets/ui/fonts` are under the SIL Open Font License 1.1; the music
 bed is CC0 1.0; the word list in `src/moderation` is LDNOOBW's, CC BY 4.0. **The Picasso Lab logo in `assets/brand` is
-not covered by the Apache License or any other licence here**: it is included only for this project's own optional
-logo (`STREAM_LOGO`, off by default); use your own (`STREAM_LOGO_FILE`) on your server. See [NOTICE](NOTICE) and
+not covered by the Apache License or any other licence here**: it is included only for the lab's own server, and is
+shown only when `STREAM_LOGO_FILE` names it (there is no default logo); use your own on your server. See [NOTICE](NOTICE) and
 [assets/ui/CREDITS.txt](assets/ui/CREDITS.txt).

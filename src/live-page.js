@@ -78,12 +78,12 @@ const p=document.querySelector('#s p');if(p)p.textContent='The game has ended. A
 const pl=st?setInterval(()=>{const i=new Image();i.onload=()=>{if(i.naturalWidth===2)end();else if(i.naturalWidth===3)turn();};i.src=st+'state.svg?'+Date.now();},15000):0;
 addEventListener('blur',()=>setTimeout(()=>{if(document.activeElement&&document.activeElement.tagName==='IFRAME')touched=1;},0));})();`;
 
-/** The default logo (STREAM_LOGO without STREAM_LOGO_FILE): the project's pixel logo, not under the Apache licence (NOTICE). */
-export const DEFAULT_LOGO = 'brand/picasso-lab-pixel-230.png';
 const ASSETS = fileURLToPath(new URL('../assets/', import.meta.url));
-/** A logo file as STREAM_LOGO_FILE names it: an absolute path, a path under assets/ (brand/...), or a name in assets/ui. */
+/** A logo file as STREAM_LOGO_FILE names it: an absolute path, a path under assets/ (brand/...), or a name in assets/ui;
+ * no name, no logo (there is no default: NOTICE). */
 export function logoPath(name = '') {
-  const n = String(name || DEFAULT_LOGO);
+  const n = String(name || '');
+  if (!n) return '';
   if (path.isAbsolute(n)) return n;
   return n.includes('/') ? path.join(ASSETS, path.normalize(n).replace(/^(\.\.[/\\])+/, '')) : path.join(ASSETS, 'ui', n);
 }
@@ -91,6 +91,7 @@ export function logoPath(name = '') {
 const LOGO_DATA = new Map();
 export const logoData = (name = '') => {
   const f = logoPath(name);
+  if (!f) return null;
   if (!LOGO_DATA.has(f)) {
     let d = null;
     try { const b = fs.readFileSync(f); if (b.length < 2_000_000 && b.subarray(1, 4).toString() === 'PNG') d = `data:image/png;base64,${b.toString('base64')}`; } catch { d = null; }
@@ -151,8 +152,8 @@ export function liveViewHtml(v) {
   // server's images) and this template (Facebook's player for the owner's videos)
   const tpl = queued && st && /^\d{1,30}$/.test(String(v.fbOwner ?? '')) ? `${facebookEmbedUrl(`https://www.facebook.com/${v.fbOwner}/videos/VIDEOID/`)}&autoplay=true&mute=true` : '';
   const player = live
-    ? `<div id="v" data-src="${esc(src)}"${st ? ` data-st="${esc(st)}"` : ''}>${posterSvg(g, aw, ah, v.logo ? logoData(typeof v.logo === 'string' ? v.logo : '') : null, null, v.name ?? '')}</div>`
-    : queued ? `<div id="v"${st ? ` data-st="${esc(st)}"` : ''}${tpl ? ` data-tpl="${esc(tpl)}"` : ''}>${posterSvg(g, aw, ah, v.logo ? logoData(typeof v.logo === 'string' ? v.logo : '') : null, v.queue ?? {}, v.name ?? '')}</div>`
+    ? `<div id="v" data-src="${esc(src)}"${st ? ` data-st="${esc(st)}"` : ''}>${posterSvg(g, aw, ah, logoData(typeof v.logo === 'string' ? v.logo : ''), null, v.name ?? '')}</div>`
+    : queued ? `<div id="v"${st ? ` data-st="${esc(st)}"` : ''}${tpl ? ` data-tpl="${esc(tpl)}"` : ''}>${posterSvg(g, aw, ah, logoData(typeof v.logo === 'string' ? v.logo : ''), v.queue ?? {}, v.name ?? '')}</div>`
       : '';
   return '<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">'
     + '<title>Minecraft live</title><style>html,body{margin:0;background:#0c0e10;color:#e8e4dc;font:13px/1.4 system-ui,sans-serif}'

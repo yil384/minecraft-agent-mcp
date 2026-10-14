@@ -11,5 +11,5 @@ The HUD's assets (src/ui-panel.js, src/hud-b.js, src/hud.js, src/camera.js):
 - music/etirwer.m4a: "Etirwer" by Kistol (opengameart.org/content/etirwer), CC0 1.0, a seamless game loop; re-encoded
   and loudness-levelled. Credit is not required; given here with thanks.
 
-The optional logo (STREAM_LOGO) is in assets/brand: the Picasso Lab logo, which is not licensed under the Apache License
-2.0 or any other licence in this repository (see NOTICE). Use your own with STREAM_LOGO_FILE.
+assets/brand holds the Picasso Lab logo, which is not licensed under the Apache License 2.0 or any other licence in
+this repository (see NOTICE). It is shown only when STREAM_LOGO_FILE names it; use your own logo with STREAM_LOGO.

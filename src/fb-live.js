@@ -236,7 +236,7 @@ export function explain(err) {
   return { text: clip(err?.message ?? err, 200), permanent: false };
 }
 
-/** The live video's title for a game: the lab demo and the game. */
+/** The live video's title for a game: the server's title (FB_TITLE) and the game. */
 export const titleFor = (base, game) => `${base} (game ${game})`.slice(0, 250);
 
 /**

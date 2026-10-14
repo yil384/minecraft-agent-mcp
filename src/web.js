@@ -543,13 +543,27 @@ export function createWeb(opts = {}) {
   const endedGames = new Map();
   // the owner's key (MCP_OWNER_KEY): compared in constant time, never logged
   const ownerDigest = web.ownerKey ? crypto.createHash('sha256').update(web.ownerKey).digest() : null;
+  // wrong owner keys per address and hour: after 5, that address's owner key is not even compared for the rest of the
+  // hour (its requests go on as anyone's)
+  const ownerFails = createLimiter(5, now);
+  // the guest pages' and /api's words go through the same word filter as every MCP call (src/moderation.js)
+  const words = moderator();
+  const cleanArgs = (s, tool, args) => {
+    const r = words.cleanValue(args);
+    if (r.removed) log.event('moderation', { game: s.id, tool, removed: r.removed, fields: r.fields.slice(0, 8), via: 'web' });
+    return r.value;
+  };
   // ?owner=<key> on the MCP URL, or the header X-Owner-Key (the access key stays in the path or Authorization: Bearer)
   const isOwner = (req) => {
     if (!ownerDigest) return false;
     let k = String(req.headers['x-owner-key'] ?? '');
     if (!k) { try { k = new URL(req.url, 'http://local').searchParams.get('owner') ?? ''; } catch { k = ''; } }
     if (!k) return false;
-    return crypto.timingSafeEqual(crypto.createHash('sha256').update(k).digest(), ownerDigest);
+    const who = clientKey(req);
+    if (!ownerFails.blocked(who).ok) return false;
+    if (crypto.timingSafeEqual(crypto.createHash('sha256').update(k).digest(), ownerDigest)) return true;
+    ownerFails.take(who);
+    return false;
   };
   // the camera's state per game for the live page (2 s cache: every page asks every 15 s)
   const camCache = new Map();
@@ -852,6 +866,7 @@ export function createWeb(opts = {}) {
     pruneQueue();
     sessionLimiter.prune();
     adminFails.prune();
+    ownerFails.prune();
     keyFails.prune();
     mcpStartLimiter.prune();
     mcpInitLimiter.prune();
@@ -955,7 +970,7 @@ export function createWeb(opts = {}) {
     const mcpUrl = `${web.publicUrl || base(req)}/mcp${keyInPath ? `/${keyInPath}` : ''}`;
     const oneLine = `Play Minecraft on ${mcpUrl} and get to the Nether and back.`;
     const source = web.openSourceUrl;
-    const logo = (cfg.stream?.logo ?? 'off') !== 'off' ? logoData(cfg.stream?.logoFile || '') : null;
+    const logo = (cfg.stream?.logo ?? 'off') !== 'off' && cfg.stream?.logoFile ? logoData(cfg.stream.logoFile) : null;
     return page({
       title: `${web.name}: the address for your AI agent`,
       index: false,
@@ -1694,7 +1709,7 @@ ${lines.length ? html`<ol class="log">${lines.map((l) => html`<li>${clock(l.at).
         newSession, lookup, startAction, stateText, stopSession, endSession, within, TIMEOUT, log, now, clientKey, base,
         leaseMs: web.leaseMs, idleMs: opts.idleMs ?? web.idleMs, testLives: Boolean(web.testLives), testRecord: Boolean(web.testRecord), initLimiter: mcpInitLimiter, callMs: opts.mcpCallMs, skills: opts.skills, careMode: opts.careMode,
         limits: { sessions: web.mcpSessions ?? 200, perAddress: web.mcpSessionsPerAddress ?? 20, perMinute: web.mcpRequestsPerMinute ?? 120, ...(opts.mcpLimits ?? {}) },
-        posterLogo: (cfg.stream?.logo ?? 'off') !== 'off' ? (cfg.stream?.logoFile || true) : false,
+        posterLogo: (cfg.stream?.logo ?? 'off') !== 'off' && cfg.stream?.logoFile ? cfg.stream.logoFile : false,
         banned, publicChat: web.publicChat !== false, moderate: opts.moderate,
         liveMode: opts.liveMode ?? (cfg.stream?.liveView && cfg.stream.liveView !== 'off' ? cfg.stream.liveView : opts.liveView ? 'facebook' : 'off'), serverName: web.name,
         links: (s, b) => ({ eyes: `${b}/eyes/${s.viewId}/`, watch: `${b}/watch/${s.viewId}/`, live: `${b}/live/${s.viewId}/`, views3d: Boolean(s.body?.eyesPort) }),
@@ -1783,7 +1798,7 @@ ${lines.length ? html`<ol class="log">${lines.map((l) => html`<li>${clock(l.at).
       if (!check.ok) { s.notice = `Not run: ${check.error}`; return redirect(res, playPath(s)); }
       if (action === 'get_state') { s.notice = 'State read.'; return redirect(res, playPath(s)); }
       if (action === 'say' && !web.publicChat && !s.owner) { s.notice = 'Not run: say (in-game chat) is off on this server (PUBLIC_CHAT=off).'; return redirect(res, playPath(s)); }
-      const started = startAction(s, action, check.args);
+      const started = startAction(s, action, cleanArgs(s, action, check.args));
       if (!started.ok) { s.notice = `Not run: ${started.error}`; return redirect(res, playPath(s)); }
       await within(started.promise, formWaitMs);
       return redirect(res, playPath(s));
@@ -1821,13 +1836,14 @@ ${lines.length ? html`<ol class="log">${lines.map((l) => html`<li>${clock(l.at).
       }
       // in-game chat is the owner's when PUBLIC_CHAT is off (the web page's guests are outside players too)
       if (action === 'say' && !web.publicChat && !s.owner) return sendJson(res, 403, { error: 'say (in-game chat) is off on this server (PUBLIC_CHAT=off)', code: 'NOT_ALLOWED' });
-      const started = startAction(s, action, check.args);
+      const args = cleanArgs(s, action, check.args);
+      const started = startAction(s, action, args);
       if (!started.ok) return sendJson(res, started.status, { error: started.error });
       const r = await within(started.promise, apiWaitMs);
       if (r === TIMEOUT) {
         return sendJson(res, 202, { running: true, tool: action, message: `still running; read GET /api/{token}/state for the result` }, PRIVATE);
       }
-      return sendJson(res, 200, { ...r, tool: action, args: check.args, state: stateText(s) }, PRIVATE);
+      return sendJson(res, 200, { ...r, tool: action, args, state: stateText(s) }, PRIVATE);
     }
     throw new HttpError(404, 'not found');
   }

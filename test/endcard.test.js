@@ -71,12 +71,13 @@ test('end card: a goal reached reads "<goal> in m:ss"; the splits with their tim
   assert.match(endCardSvg({ game: 'g1', report: null }), /Game ended at 0:00/, 'a game without a report still gets a card');
 });
 
-test('live page: the poster with the pixel logo (STREAM_LOGO on) as a data: image, or the operator\'s own file; none with it off', () => {
+test('live page: the poster with the operator\'s logo (STREAM_LOGO with STREAM_LOGO_FILE) as a data: image; none with it off, and no default logo', () => {
   const embed = 'https://www.facebook.com/plugins/video.php?href=https%3A%2F%2Fwww.facebook.com%2F1%2Fvideos%2F2%2F&show_text=false';
-  const on = liveViewHtml({ state: 'live', game: 'gabc123', embedUrl: embed, logo: true });
+  const on = liveViewHtml({ state: 'live', game: 'gabc123', embedUrl: embed, logo: 'brand/picasso-lab-pixel-230.png' });
   assert.match(on, /<image href="data:image\/png;base64,[A-Za-z0-9+/=]{1000,}" [^>]*image-rendering:pixelated/);
   assert.ok(Buffer.byteLength(on) < 60_000, `${Buffer.byteLength(on)} bytes`);
   assert.doesNotMatch(liveViewHtml({ state: 'live', game: 'gabc123', embedUrl: embed }), /<image /);
+  assert.doesNotMatch(liveViewHtml({ state: 'live', game: 'gabc123', embedUrl: embed, logo: true }), /<image /, 'no file named: no logo (there is no default)');
   // STREAM_LOGO_FILE: a name in assets/ui, a path under assets/, or an absolute path; a file that is not there: no logo
   const own = liveViewHtml({ state: 'live', game: 'gabc123', embedUrl: embed, logo: 'ui/icons/diamond.png' });
   assert.match(own, /<image href="data:image\/png;base64,/);

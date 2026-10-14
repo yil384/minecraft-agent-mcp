@@ -31,9 +31,10 @@ src/moderation/ldnoobw-en.txt
 
 assets/brand/picasso-lab-pixel-230.png
   The Picasso Lab logo. Copyright 2026 Picasso Lab, UC San Diego. All rights reserved: the logo is NOT licensed under
-  the Apache License 2.0 or any other licence in this repository. It is included only so that this project's own
-  builds can show it (STREAM_LOGO, off by default). Do not use it to brand another project or service, or in a way that
-  suggests Picasso Lab or UC San Diego runs or endorses your server; set STREAM_LOGO_FILE to your own logo instead.
+  the Apache License 2.0 or any other licence in this repository. It is included only so that the lab's own server
+  can show it, and it is shown only when STREAM_LOGO_FILE names it (there is no default logo). Do not use it to brand
+  another project or service, or in a way that suggests Picasso Lab or UC San Diego runs or endorses your server; set
+  STREAM_LOGO_FILE to your own logo instead.
 
 This repository contains no Minecraft code or assets and no Paper, Fabric, Sodium or other mod binaries. The setup
 downloads them on the user's machine, checks each against a pinned hash, and each stays under its own licence (see

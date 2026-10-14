@@ -229,8 +229,8 @@ export function loadConfig(env = process.env) {
     // chat) to the owner's key
     publicPlay: r.bool('PUBLIC_PLAY', true),
     publicChat: r.bool('PUBLIC_CHAT', true),
-    // the project's source, linked from the page a browser gets at /mcp (empty: no link)
-    openSourceUrl: r.str('OPEN_SOURCE_URL', 'https://github.com/yil384/minecraft-agent-mcp'),
+    // the project's source, linked from the page a browser gets at /mcp (off: no link; empty: this project)
+    openSourceUrl: ((u) => (/^(off|none|false)$/i.test(u) ? '' : u))(r.str('OPEN_SOURCE_URL', 'https://github.com/yil384/minecraft-agent-mcp')),
     // address hashes that may not play (GET /admin/games shows them): comma separated
     bannedIps: r.str('WEB_BANNED_IPS', '').split(',').map((x) => x.trim().toLowerCase()).filter(Boolean),
     maxBodyBytes: r.int('WEB_MAX_BODY', 8_192, 1_024, 1_048_576),
@@ -372,8 +372,8 @@ export function loadConfig(env = process.env) {
     hud: r.oneOf('STREAM_HUD', 'b', ['b', 'final']),
     // a logo at the top right of the video and on the live page's poster (B only; never in the clean recording): off
     // (the default), a transparent light logo drawn as it is with a hard dark shadow (plain), or a light logo on a white
-    // card (card); STREAM_LOGO_FILE its PNG, a name in assets/ui, a path under assets/ or an absolute path (default: the
-    // project's pixel logo, assets/brand/picasso-lab-pixel-230.png, which is not under the Apache licence: NOTICE)
+    // card (card); STREAM_LOGO_FILE its PNG, a path under assets/ (brand/...) or an absolute path. There is no default:
+    // the lab's pixel logo in assets/brand is not under the Apache licence (NOTICE) and is shown only when named here
     logo: r.oneOf('STREAM_LOGO', 'off', ['off', 'card', 'plain']),
     logoFile: r.str('STREAM_LOGO_FILE', ''),
     terminalSize: r.oneOf('STREAM_TERMINAL_SIZE', '1080x1920', ['1080x1920', '1080x1350']),
@@ -418,6 +418,7 @@ export function loadConfig(env = process.env) {
   };
   hidden(stream, 'outputs', outputs);
   hidden(stream, 'serviceToken', serviceToken);
+  if (stream.logo !== 'off' && !stream.logoFile) problems.push('STREAM_LOGO needs STREAM_LOGO_FILE, your own logo: a PNG under assets/ (for example brand/mine.png) or an absolute path');
   if (role === 'agent' && stream.serviceUrl && !serviceToken) problems.push('the camera service needs STREAM_SERVICE_TOKEN, the same in the agent and the camera (setup.sh writes it; make one with: openssl rand -hex 24)');
   if (stream.camera.msaClientId && !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(stream.camera.msaClientId)) problems.push('CAMERA_MSA_CLIENT_ID must be your Azure app\'s client id (a GUID)');
   if (stream.camera.name && !/^[A-Za-z0-9_]{3,16}$/.test(stream.camera.name)) problems.push(`CAMERA_NAME must be 3-16 letters, digits or _ (got "${stream.camera.name}")`);
