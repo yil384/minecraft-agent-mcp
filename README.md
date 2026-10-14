@@ -6,6 +6,21 @@ smelt, build, hunt, fight, shelter, portal and more), with a why and a plan on e
 end. Optionally a camera films the game: on a watch page in your own browser, or as a live video on your own Facebook
 profile or Page.
 
+<p align="center">
+  <img src="docs/media/demo.gif" width="720" alt="The agent lights a Nether portal, goes through and comes back: Nether and back in 20:19">
+</p>
+
+<p align="center"><b>Meta's Muse played this game by itself from one sentence: Nether and back in 20:19, 0 deaths,
+every move its own decision.</b><br>
+Try it with your own agent: add <code>https://play.picasso-lab.com/mcp</code> to any MCP client and send<br>
+<i>"Play Minecraft on https://play.picasso-lab.com/mcp and get to the Nether and back."</i><br>
+or run the whole thing yourself with this repository.</p>
+
+<p align="center">
+  <img src="docs/media/live-stream.png" width="420" alt="The live view: the game, the agent's current command with its own why, the 12 splits, who did what, and the raw MCP calls">
+  <br><sub>The live view: each command pops up with the agent's own why; below are the splits, who did what, and the raw MCP calls.</sub>
+</p>
+
 > **NOT AN OFFICIAL MINECRAFT PRODUCT. NOT APPROVED BY OR ASSOCIATED WITH MOJANG OR MICROSOFT.**
 > Not affiliated with, endorsed by or sponsored by Meta Platforms, Inc., Mojang Studios or Microsoft. Minecraft is a
 > trademark of Mojang Synergies AB; Facebook is a trademark of Meta Platforms, Inc.
