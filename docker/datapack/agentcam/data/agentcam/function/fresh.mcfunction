@@ -6,3 +6,5 @@ scoreboard players set #nc agentcam_y 0
 scoreboard players set #hd agentcam_y 0
 scoreboard players set #vb agentcam_y 0
 scoreboard players set #vc agentcam_y 0
+scoreboard players set #fq agentcam_y 100
+tag @a[tag=agentcam] remove agentcam_fp

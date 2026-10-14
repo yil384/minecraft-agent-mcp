@@ -94,7 +94,7 @@ test('console: validated lines; a FIFO nobody reads fails at once instead of han
   // the console only tags; the Paper datapack (docker/datapack/agentcam) rides the eye or the head every tick
   assert.deepEqual(followCommands('AgentCam', 'Bot_g1'), [
     ['gamemode spectator AgentCam', 'execute as AgentCam run spectate', 'tag @a remove agentcam_target', 'tag AgentCam add agentcam', 'tag AgentCam add agentcam_third',
-      'tag AgentCam remove agentcam_ineye', 'tag AgentCam remove agentcam_inhead', 'effect give AgentCam minecraft:night_vision infinite 0 true', 'tp AgentCam Bot_g1'],
+      'tag AgentCam remove agentcam_ineye', 'tag AgentCam remove agentcam_inhead', 'tag AgentCam remove agentcam_fp', 'effect give AgentCam minecraft:night_vision infinite 0 true', 'tp AgentCam Bot_g1'],
     ['tag Bot_g1 add agentcam_target', 'function agentcam:fresh'],
   ]);
   assert.ok(followCommands('AgentCam', 'Bot_g1', 'first')[0].includes('tag AgentCam remove agentcam_third'), 'CAMERA_VIEW=first: the bot\'s head');
@@ -102,7 +102,7 @@ test('console: validated lines; a FIFO nobody reads fails at once instead of han
   assert.deepEqual(keep, ['tag Bot_g1 add agentcam_target', 'execute unless score cam_seq agentcam_y = cam_logged agentcam_y run data get storage agentcam:spot',
     'execute unless score cam_seq agentcam_y = cam_logged agentcam_y run scoreboard players operation cam_logged agentcam_y = cam_seq agentcam_y'], 'and the evidence of a new camera spot, into the server log once');
   assert.deepEqual(parkCommands('AgentCam'), ['tag @a remove agentcam_target', 'kill @e[type=minecraft:item_display,tag=agentcam_eye]', 'kill @e[type=minecraft:marker,tag=agentcam_yaw]', 'kill @e[type=minecraft:marker,tag=agentcam_try]',
-    'tag AgentCam remove agentcam_ineye', 'tag AgentCam remove agentcam_inhead', 'execute as AgentCam run spectate', 'execute as AgentCam at @s run tp @s ~ 250 ~ ~ -90']);
+    'tag AgentCam remove agentcam_ineye', 'tag AgentCam remove agentcam_inhead', 'tag AgentCam remove agentcam_fp', 'execute as AgentCam run spectate', 'execute as AgentCam at @s run tp @s ~ 250 ~ ~ -90']);
   for (const l of [...followCommands('AgentCam', 'Bot_g1').flat(), ...keep, ...parkCommands('AgentCam')]) await consoleCommand(file, l);
 });
 
@@ -184,7 +184,7 @@ test('rig on stand-in programs: joins, spectator and park on the console, F1 onc
     assert.equal(JSON.stringify(rows).includes(TOKEN), false, 'nor in the log rows');
 
     await rig.follow('Bot_g1');
-    assert.deepEqual(lines().slice(-11), followCommands('AgentCam', 'Bot_g1').flat());
+    assert.deepEqual(lines().slice(-12), followCommands('AgentCam', 'Bot_g1').flat());
     assert.equal(await rig.follow('bad name; op'), false, 'never a console line from a bad name');
 
     const pid = (await rig.stats()).clientPid;
@@ -422,6 +422,10 @@ test('datapack: every function the camera\'s datapack calls is there, and every 
   assert.match(files.get('hold'), /#hv agentcam_y matches 2[^\n]*good_far/);
   assert.ok(files.get('outside').indexOf('function agentcam:inside') < files.get('outside').indexOf('function agentcam:choose'));
   assert.match(files.get('inside'), /#v14 agentcam_y matches 1/);
+  // g0a414c: just ahead of its face only with open air 1.2 blocks ahead (else a wall fills the picture); in a tunnel,
+  // behind it just under eye height (22), after that and before straight above its head
+  assert.match(sh, /positioned \^ \^ \^0\.3 if block ~ ~ ~ #agentcam:open if block \^ \^ \^0\.6 #agentcam:open if block \^ \^ \^1\.2 #agentcam:open run scoreboard players set #sr agentcam_y 12/);
+  assert.ok(sh.indexOf('set #sr agentcam_y 12') < sh.indexOf('set #sr agentcam_y 22') && sh.indexOf('set #sr agentcam_y 22') < sh.indexOf('set #sr agentcam_y 13'));
   assert.ok(sh.indexOf('function agentcam:overhead') > sh.indexOf('set #sr agentcam_y 13') && sh.indexOf('function agentcam:overhead') < sh.lastIndexOf('set #sr agentcam_y 15'), 'after straight down, before the spots behind');
   assert.match(files.get('note_new'), /run return 0\n/);
   assert.equal((files.get('note_col').match(/function agentcam:nb/g) ?? []).length, 25);

@@ -19,6 +19,8 @@ execute if score #rr agentcam_rr matches 100 run function agentcam:reride
 execute unless entity @e[type=minecraft:item_display,tag=agentcam_eye] at @a[tag=agentcam_target,limit=1] run function agentcam:new_eye
 function agentcam:yaw
 execute if entity @a[tag=agentcam_target,tag=agentcam_shut] run function agentcam:outside
+# enclosed: the views from outside, never first person over the shoulder
+execute if entity @a[tag=agentcam_target,tag=agentcam_shut] run tag @a[tag=agentcam] remove agentcam_fp
 execute unless entity @a[tag=agentcam_target,tag=agentcam_shut] run function agentcam:shoulder
 # out of the shelter: the next one chooses its spot afresh
 execute unless entity @a[tag=agentcam_target,tag=agentcam_shut] run scoreboard players set #on agentcam_y 0

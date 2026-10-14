@@ -7,6 +7,9 @@ execute if score #t agentcam_t matches 100.. run scoreboard players set #t agent
 # enclosed with no spot outside (agentcam:deep): through the bot's own eyes
 execute if entity @a[tag=agentcam_target,tag=agentcam_shut,tag=agentcam_deep] as @a[tag=agentcam,tag=!agentcam_inhead] run function agentcam:to_head
 execute if entity @a[tag=agentcam_target,tag=agentcam_shut,tag=agentcam_deep] run return 0
-execute as @a[tag=agentcam,tag=agentcam_third,tag=!agentcam_ineye] run function agentcam:to_eye
+# in third person the eye, except in first person over the shoulder (agentcam_fp, agentcam:shoulder: a spot at or just
+# ahead of the bot's eyes would put the camera inside its head): then the bot's head, its own model not drawn
+execute as @a[tag=agentcam,tag=agentcam_third,tag=!agentcam_fp,tag=!agentcam_ineye] run function agentcam:to_eye
+execute as @a[tag=agentcam,tag=agentcam_third,tag=agentcam_fp,tag=!agentcam_inhead] run function agentcam:to_head
 execute if entity @a[tag=agentcam_target,tag=agentcam_shut] as @a[tag=agentcam,tag=!agentcam_third,tag=!agentcam_ineye] run function agentcam:to_eye
 execute unless entity @a[tag=agentcam_target,tag=agentcam_shut] as @a[tag=agentcam,tag=!agentcam_third,tag=!agentcam_inhead] run function agentcam:to_head
