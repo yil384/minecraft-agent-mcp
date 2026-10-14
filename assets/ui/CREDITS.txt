@@ -1,4 +1,4 @@
-The HUD's assets (src/ui-panel.js, src/hud.js, src/camera.js):
+The HUD's assets (src/ui-panel.js, src/hud-b.js, src/hud.js, src/camera.js):
 
 - icons/: the HUD's item and status icons: original artwork made for this project (AI-assisted, then edited by the
   project), licensed with the repository under the Apache License 2.0. They are not Minecraft textures and contain no
@@ -10,3 +10,6 @@ The HUD's assets (src/ui-panel.js, src/hud.js, src/camera.js):
   calls in the HUD.
 - music/etirwer.m4a: "Etirwer" by Kistol (opengameart.org/content/etirwer), CC0 1.0, a seamless game loop; re-encoded
   and loudness-levelled. Credit is not required; given here with thanks.
+
+The optional logo (STREAM_LOGO) is in assets/brand: the Picasso Lab logo, which is not licensed under the Apache License
+2.0 or any other licence in this repository (see NOTICE). Use your own with STREAM_LOGO_FILE.
