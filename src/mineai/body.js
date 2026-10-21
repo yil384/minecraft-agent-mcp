@@ -21,7 +21,7 @@ import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/
 import { inventoryDelta } from '../contracts.js';
 import { renderState, describeCall, describeDelta } from '../state.js';
 import { NOTABLE_BLOCKS } from '../state.js';
-import { MINEAI_SKILLS, MINEAI_TIMEOUTS, DIRECT_TOOLS, CONTAINER_BLOCKS, SPAWN_GUARD, toTheirs, fromTheirs, doneSoFar, reflexTakeover, reflexWords, ownChange, splitError } from './skills.js';
+import { MINEAI_SKILLS, MINEAI_TIMEOUTS, DIRECT_TOOLS, CONTAINER_BLOCKS, SPAWN_GUARD, CONTINUE_RADIUS, toTheirs, fromTheirs, doneSoFar, reflexTakeover, reflexWords, ownChange, splitError } from './skills.js';
 export { reflexTakeover };
 import { createCare, describeRules, armorPlan, wearPlan, toolClassFor, toolOf, pickaxeTierFor, sparePlan, replacementFor, describeCare, describeReflexes, ARMOR_SLOTS, armorOf } from './care.js';
 
@@ -149,6 +149,27 @@ const REPLACEABLE = /^(air|cave_air|void_air|short_grass|tall_grass|grass|fern|l
  * corners included (real game gd7540a, 2026-10-14: the search took the 4 corner blocks of another player's lit
  * frame, which touch no portal block on a face, and the agent walked back twice for "the obsidian deposit" there).
  */
+/**
+ * Still lava (level 0) grouped into pools as their cast groups it (sources within 8 blocks of a pool's first one), the
+ * nearest first: [{x, y, z, sources, d}] from a find's listed lava and where the bot stands.
+ */
+export function lavaPools(listed, p) {
+  const sources = (listed ?? []).filter((l) => !Number.isFinite(l.level) || l.level === 0).map(floorPos)
+    .sort((a, b) => Math.hypot(a.x - p.x, a.y - p.y, a.z - p.z) - Math.hypot(b.x - p.x, b.y - p.y, b.z - p.z));
+  const pools = [];
+  for (const s of sources) {
+    const pool = pools.find((q) => Math.hypot(q.x0 - s.x, q.y0 - s.y, q.z0 - s.z) <= 8);
+    if (pool) {
+      pool.sources += 1;
+      if (s.y > pool.y) Object.assign(pool, { x: s.x, y: s.y, z: s.z }); // its surface: where a pour lands
+    } else pools.push({ x: s.x, y: s.y, z: s.z, x0: s.x, y0: s.y, z0: s.z, sources: 1 });
+  }
+  return pools.map(({ x0, y0, z0, ...q }) => ({ ...q, d: Math.round(Math.hypot(q.x - p.x, q.y - p.y, q.z - p.z)) }));
+}
+/** A pool in words: "the still lava pool at x y z (n sources), d blocks away". */
+const poolSize = (q) => (q.sources === 1 ? '1 source: 1 obsidian at most' : `${q.sources} sources`);
+const poolWords = (q) => `the still lava pool at ${q.x} ${q.y} ${q.z}, ${q.d} blocks away (${poolSize(q)})`;
+
 export function litFrameCell(q, portalAt) {
   for (let dx = -1; dx <= 1; dx++) for (let dy = -1; dy <= 1; dy++) for (let dz = -1; dz <= 1; dz++) {
     if ((dx || dy || dz) && portalAt.has(`${q.x + dx},${q.y + dy},${q.z + dz}`)) return true;
@@ -225,7 +246,9 @@ export function subStepOf(tool, args = {}, cp = {}) {
 }
 
 /** Calls sent once more after one of their reflexes cut them short (sending them again repeats nothing). */
-export const RETRY_AFTER_REFLEX = new Set(['craft_item', 'smelt_item', 'equip', 'eat_food', 'place_block', 'use_bucket', 'navigate', 'build_structure', 'activate_portal']);
+// a hunt and a collect a fight cut short go on after it, for what is still missing (real game g2409ce,
+// 2026-10-14: a sheep hunt the defend rule's fight interrupted was never sent again, and health stayed at 8.8)
+export const RETRY_AFTER_REFLEX = new Set(['craft_item', 'smelt_item', 'equip', 'eat_food', 'place_block', 'use_bucket', 'navigate', 'build_structure', 'activate_portal', 'collect_mob_drop', 'collect_block']);
 /** collect obsidian makes it from lava within this many blocks of the bot, else it is refused. */
 export const LAVA_NEAR = 16;
 
@@ -422,6 +445,14 @@ export function createMineAiBody({ config, log, hosts, gameId, username, viewId 
         const p = latest.position ? floorPos(latest.position) : null;
         const liquid = /\b(lava|water) at (-?\d+) (-?\d+) (-?\d+)/.exec(String(last?.result ?? ''));
         const options = [];
+        // too near the world spawn (frames are refused there): a spot well away, straight out from it
+        if (/world spawn/.test(String(last?.result ?? '')) && p && spawnAt) {
+          const dx = p.x - spawnAt.x;
+          const dz = p.z - spawnAt.z;
+          const len = Math.hypot(dx, dz) || 1;
+          const to = { x: Math.round(spawnAt.x + (dx / len) * (SPAWN_GUARD + 12)), y: p.y, z: Math.round(spawnAt.z + (dz / len) * (SPAWN_GUARD + 12)) };
+          options.push({ text: `build farther from the world spawn: go_to ${to.x} ${to.y} ${to.z}, then build`, hint: { skill: 'go_to', args: to } });
+        }
         if (liquid && p) {
           const to = { x: p.x + 8 * (Math.sign(p.x - Number(liquid[2])) || 1), y: p.y, z: p.z + 8 * (Math.sign(p.z - Number(liquid[4])) || 1) };
           options.push({ text: `build 8 blocks farther from the ${liquid[1]}: go_to ${to.x} ${to.y} ${to.z}, then build`, hint: { skill: 'go_to', args: to } });
@@ -665,14 +696,18 @@ export function createMineAiBody({ config, log, hosts, gameId, username, viewId 
     const submit = () => rpc(call.tool, { ...call.args, submission_id: tries++ ? `${submission}-${tries}` : submission, wait_timeout_ms: first() }, first() + RPC_SLACK_MS);
     let data = await submit();
     // a result of an earlier action not read yet (a call cut short), or an action still running: read it, then once more
-    if (data.state === 'refused' && (data.unretrievedActionId || data.activeActionId)) {
+    // a reflex that owns the body (its fight has an action id too: "body owner: hostile_reflex ... activeActionId") is
+    // waited for below, never cancelled as a step of ours left running (a scripted test run, 2026-10-14: 43 steps of one game
+    // failed "ACTION_BUSY" at night)
+    const reflexOwns = (d) => d.state === 'refused' && d.code === 'ACTION_BUSY' && /body owner: [a-z_]*reflex/.test(String(d.error ?? ''));
+    if (data.state === 'refused' && (data.unretrievedActionId || data.activeActionId) && !reflexOwns(data)) {
       const other = data.unretrievedActionId ?? data.activeActionId;
       if (data.activeActionId) await rpc('cancel_foreground_action', { action_id: other, reason: 'an earlier step was left running' });
       await rpc('wait_for_action', { action_id: other, timeout_ms: 15_000 }, 35_000);
       data = await submit();
     }
     // the body is busy looking after itself (one of their reflexes owns it): wait for it, up to the skill's limit
-    const heldBy = (d) => (d.state === 'refused' && d.code === 'ACTION_BUSY' && !d.activeActionId ? /body owner: ([a-z_]+)/.exec(String(d.error ?? ''))?.[1] ?? 'its own business' : null);
+    const heldBy = (d) => (d.state === 'refused' && d.code === 'ACTION_BUSY' && (!d.activeActionId || reflexOwns(d)) ? /body owner: ([a-z_]+)/.exec(String(d.error ?? ''))?.[1] ?? 'its own business' : null);
     if (heldBy(data)) {
       const since = Date.now();
       let owner = heldBy(data);
@@ -894,6 +929,38 @@ export function createMineAiBody({ config, log, hosts, gameId, username, viewId 
    * stuck advice): the nearest formed obsidian and what is around it (water over it, lava beside it), the nearest
    * still lava pool, and a frame from 10.
    */
+  /**
+   * A place to stand on a lava pool's shore for the pour: a cell with room for the bot over solid ground, one above an
+   * open source (air over it) and within 2 blocks of it, from small boxes read around the pool's nearest sources; the
+   * one nearest the bot, or null. (A scripted test run, 2026-10-14: at lakes of 23 to 64 sources their pour found no stance.)
+   */
+  async function poolStance(sources) {
+    const p = latest.position ? floorPos(latest.position) : null;
+    if (!p || !sources?.length) return null;
+    const near = [...sources].sort((a, b) => Math.hypot(a.x - p.x, a.y - p.y, a.z - p.z) - Math.hypot(b.x - p.x, b.y - p.y, b.z - p.z)).slice(0, 4);
+    const at = new Map();
+    for (const s of near) {
+      const data = await rpc('view_blocks', { box: { x: s.x, y: s.y + 1, z: s.z, half_width: 2, half_height: 2 } }, 10_000).catch(() => null);
+      const box = data?.result?.blocks?.box;
+      if (!box?.layers) continue;
+      for (const layer of box.layers) for (const row of layer.rows) row.blocks.forEach((name, i) => { at.set(`${box.center.x - box.halfWidth + i},${layer.y},${row.z}`, name); });
+    }
+    const free = (n) => n !== undefined && REPLACEABLE.test(n);
+    const solid = (n) => n !== undefined && n !== 'unloaded' && !REPLACEABLE.test(n) && !/^(water|lava|bubble_column)$|_leaves$/.test(n);
+    let best = null;
+    for (const s of near) {
+      if (!free(at.get(`${s.x},${s.y + 1},${s.z}`))) continue; // under more lava or rock: no pour lands on it
+      for (let dx = -2; dx <= 2; dx++) for (let dz = -2; dz <= 2; dz++) {
+        if (!dx && !dz) continue;
+        const c = { x: s.x + dx, y: s.y + 1, z: s.z + dz };
+        if (!free(at.get(`${c.x},${c.y},${c.z}`)) || !free(at.get(`${c.x},${c.y + 1},${c.z}`)) || !solid(at.get(`${c.x},${c.y - 1},${c.z}`))) continue;
+        const d = Math.hypot(c.x - p.x, c.y - p.y, c.z - p.z);
+        if (!best || d < best.d) best = { ...c, d };
+      }
+    }
+    return best ? { x: best.x, y: best.y, z: best.z, d: Math.round(best.d) } : null;
+  }
+
   async function obsidianStuck(mined = 0) {
     const p = latest.position ? floorPos(latest.position) : null;
     const near = await formedObsidian(12).catch(() => []);
@@ -911,19 +978,30 @@ export function createMineAiBody({ config, log, hosts, gameId, username, viewId 
       const water = at(0, 1, 0) === 'water' || beside.some(([dx, dy, dz]) => at(dx, dy, dz) === 'water');
       const lava = beside.concat([[0, 1, 0], [0, -1, 0]]).some(([dx, dy, dz]) => at(dx, dy, dz) === 'lava');
       parts.push(`the nearest formed obsidian is at ${q.x} ${q.y} ${q.z}, ${Math.round(q.d)} blocks away${water ? ', under or beside water (the water poured did not all go back into the bucket)' : ''}${lava ? ', with lava beside it' : ''}`);
-      if (water) options.push({ text: `scoop the water: bucket fill water at ${q.x} ${q.y + 1} ${q.z}, then collect obsidian again`, hint: { skill: 'bucket', args: { action: 'fill', liquid: 'water', pos: { x: q.x, y: q.y + 1, z: q.z } } } });
+      // only with an empty bucket to scoop with (a scripted test run: "Bot inventory holds no bucket" with the water bucket full)
+      const emptyBucket = (latest.inventory?.bucket ?? 0) > 0 && !((latest.inventory?.water_bucket ?? 0) > 0);
+      if (water && emptyBucket) options.push({ text: `scoop the water: bucket fill water at ${q.x} ${q.y + 1} ${q.z}, then collect obsidian again`, hint: { skill: 'bucket', args: { action: 'fill', liquid: 'water', pos: { x: q.x, y: q.y + 1, z: q.z } } } });
       const side = beside.map(([dx, , dz]) => ({ x: q.x + dx, y: q.y, z: q.z + dz })).find((c) => !['lava', 'water'].includes(at(c.x - q.x, 0, c.z - q.z)));
       if (side) options.push({ text: `stand right beside it: go_to ${side.x} ${side.y} ${side.z}, then collect obsidian 1`, hint: { skill: 'go_to', args: side } });
     } else parts.push('no formed obsidian is loaded within 12 blocks');
     const data = await rpc('view_blocks', { find: { block_names: ['lava'], limit: 64 } }, 10_000).catch(() => null);
-    const pool = (data?.result?.blocks?.find?.[0]?.listed ?? []).filter((l) => !Number.isFinite(l.level) || l.level === 0).map(floorPos)
-      .map((l) => ({ ...l, d: p ? Math.round(Math.hypot(l.x - p.x, l.y - p.y, l.z - p.z)) : 0 })).sort((a, b) => a.d - b.d)[0];
-    if (pool) options.push({ text: `make more at the still lava pool at ${pool.x} ${pool.y} ${pool.z}, ${pool.d} blocks away: go_to a spot a few blocks from it, then collect obsidian`, hint: { skill: 'go_to', args: { x: pool.x + 3, y: pool.y + 1, z: pool.z } } });
+    const pools = p ? lavaPools(data?.result?.blocks?.find?.[0]?.listed ?? [], p).filter((q) => !spawnAt || Math.hypot(q.x - spawnAt.x, q.z - spawnAt.z) > SPAWN_GUARD) : [];
+    // the pool here first: their cast gives up on a pool it cannot reach from where it stands; then the next one
+    const here = pools.find((q) => q.d <= 16);
+    if (here) {
+      parts.push(`${poolWords(here)} is here, but no obsidian came from it`);
+      const listedHere = (data?.result?.blocks?.find?.[0]?.listed ?? []).filter((l) => (!Number.isFinite(l.level) || l.level === 0) && Math.hypot(l.x - here.x, l.y - here.y, l.z - here.z) <= 8).map(floorPos);
+      const stance = await poolStance(listedHere).catch(() => null);
+      if (stance) options.push({ text: `stand on its shore, above an open source: go_to ${stance.x} ${stance.y} ${stance.z}, then collect obsidian`, hint: { skill: 'go_to', args: { x: stance.x, y: stance.y, z: stance.z } } });
+    }
+    if (!((latest.inventory?.water_bucket ?? 0) > 0)) parts.push((latest.inventory?.bucket ?? 0) > 0 ? 'your bucket is empty (the last pour was not scooped back): collect obsidian fills it from the nearest water first' : 'no water bucket is carried');
+    const pool = pools.find((q) => q.d > 16 && q.sources >= 2) ?? pools.find((q) => q.d > 16);
+    if (pool) options.push({ text: `make more at ${poolWords(pool)}: go_to a spot a few blocks from it, then collect obsidian`, hint: { skill: 'go_to', args: { x: pool.x + 3, y: pool.y + 1, z: pool.z } } });
     if (have >= 10) options.push({ text: `build nether_portal now: ${have} obsidian is enough when you carry 2 other blocks (cobblestone, dirt) for its top corners`, hint: { skill: 'build', args: { blueprint: 'nether_portal', material: 'obsidian' } } });
     return { text: `no obsidian came in${mined ? ` after the first ${mined}` : ''}: ${parts.join('; ')}`, options };
   }
 
-  async function obsidianGuard() {
+  async function obsidianGuard(want = 1) {
     const refuse = (result, code = 'FAILED') => ({ ok: false, result, code, delta: {} });
     const p = latest.position;
     if ((dimension ?? 'overworld') !== 'overworld') return refuse('obsidian is made and collected in the Overworld only (in the Nether it would take portal frames, yours included)');
@@ -956,8 +1034,13 @@ export function createMineAiBody({ config, log, hosts, gameId, username, viewId 
     const lava = near.filter((l) => !Number.isFinite(l.level) || l.level === 0).map(floorPos);
     // where the nearest pool is, when one is loaded farther away: the player can walk there (a test bench, 2026-10-12:
     // lava listed in sight, but no pool within 16 blocks, and nothing said where one was)
-    const pool = listed.filter((l) => !Number.isFinite(l.level) || l.level === 0).sort((a, b) => away(a) - away(b))[0];
-    const there = pool ? ` The nearest lava pool loaded is at ${floorPos(pool).x} ${floorPos(pool).y} ${floorPos(pool).z}, ${Math.round(away(pool))} blocks away: go_to a spot a few blocks from it first.` : '';
+    // pools as their cast groups them, with how many sources each has: one big enough for what is asked first, so the
+    // walk goes to a pool that can give it (real game g2409ce, 2026-10-14: three pools in turn, 12 minutes)
+    // never a pool by the world spawn (refused there: a scripted test run found the guard sending the bot to one, 2026-10-14)
+    const pools = lavaPools(listed, floorPos(p)).filter((q) => !spawnAt || Math.hypot(q.x - spawnAt.x, q.z - spawnAt.z) > SPAWN_GUARD);
+    const enough = pools.find((q) => q.sources >= Math.min(want, 8));
+    const pool = enough ?? pools[0];
+    const there = pool ? ` The nearest lava pool loaded is at ${pool.x} ${pool.y} ${pool.z}, ${pool.d} blocks away (${poolSize(pool)}${pool !== pools[0] ? `; a nearer one at ${pools[0].x} ${pools[0].y} ${pools[0].z} has only ${pools[0].sources}` : ''}): go_to a spot a few blocks from it first.` : '';
     // the obsidian in sight is a lit frame's (gd7540a: the agent came back to it as "the obsidian deposit"): said first
     const litFirst = lit ? `the obsidian at the lit portal at ${lit.nearest.x} ${lit.nearest.y} ${lit.nearest.z} is its frame and is never taken; ` : '';
     if (!lava.length && near.length) return refuse(`${litFirst}the lava within ${LAVA_NEAR} blocks is flowing, not a pool: obsidian forms on still lava.${there || ' Go next to a lava pool first (get_state lists lava among the nearby blocks).'}`, 'LAVA');
@@ -1061,6 +1144,7 @@ export function createMineAiBody({ config, log, hosts, gameId, username, viewId 
     let deathBefore = lastDeath;
     let built = null; // a build's structure (toTheirs), remembered below while it is incomplete
     let dismantling = false; // portal dismantle: its own frame's obsidian back
+    let reclaimed = null; // an unfinished frame's cells taken back for a new frame (below)
     let skipped = null; // the last optional call that did not work, in words
     const notThere = []; // dismantle: frame cells that held another block, not obsidian (nothing to take back there)
     let refusedFirst = false; // refused before anything ran: not an action of the player's
@@ -1106,9 +1190,26 @@ export function createMineAiBody({ config, log, hosts, gameId, username, viewId 
           const kinds = [...new Set(site.clear.map((c) => c.name))];
           plan.note = `${plan.note ? `${plan.note}; ` : ''}cleared ${plural(site.clear.length, 'cell')} of ${kinds.join(' and ')} for it first`;
         } else plan.refused = site;
+        // an unfinished frame of this game's within reach that this build does not continue (its site was bad): its
+        // obsidian is taken back first and goes into this one, never a second frame beside it (real game
+        // g2409ce, 2026-10-14: a new frame facing south beside the 17-of-18 one, the last 3 obsidian spent on it)
+        const old = lastPortal;
+        const feetNow = latest.position ? floorPos(latest.position) : null;
+        const fresh = plan.build !== lastBuild;
+        if (!plan.refused && fresh && old && !old.complete && old.dimension === (dimension ?? 'overworld') && feetNow && old.cells?.length
+          && old.cells.some((c) => Math.hypot(c.x - feetNow.x, c.z - feetNow.z) <= CONTINUE_RADIUS && Math.abs(c.y - feetNow.y) <= 6)) {
+          const newCells = new Set(plan.build.cells.filter((c) => c.block_name === 'obsidian').map((c) => `${c.x},${c.y},${c.z}`));
+          const takeBack = old.cells.filter((c) => !newCells.has(`${c.x},${c.y},${c.z}`));
+          if (takeBack.length) {
+            plan.calls = [...takeBack.map((c) => ({ tool: 'collect_block', args: { block_name: 'obsidian', x: c.x, y: c.y, z: c.z }, optional: true, quiet: true, reclaim: true })), ...plan.calls];
+            plan.note = `${plan.note ? `${plan.note}; ` : ''}took back the obsidian of your unfinished frame at ${old.frame.x} ${old.frame.y} ${old.frame.z} first (its site would not do)`;
+            reclaimed = takeBack;
+            plan.timeoutMs = Math.max(plan.timeoutMs ?? timeouts.build ?? 60_000, 60_000 + 10_000 * takeBack.length);
+          }
+        }
       }
       if (!plan.refused && tool === 'collect' && v.args.block === 'obsidian') {
-        const g = await obsidianGuard();
+        const g = await obsidianGuard(v.args.n);
         if (g?.note) plan.note = `${plan.note ? `${plan.note}; ` : ''}${g.note}`;
         else if (g?.code === 'LAVA' && /(^|; )(no lava pool within|the lava within \d+ blocks is flowing)/.test(g.result)) {
           // no pool near, but obsidian already formed beside the bot (not a frame): that much is mined at its cells,
@@ -1129,7 +1230,20 @@ export function createMineAiBody({ config, log, hosts, gameId, username, viewId 
           if (near.length) {
             const n = v.args.n;
             const exact = near.slice(0, n).map((c) => ({ tool: 'collect_block', args: { block_name: 'obsidian', x: c.x, y: c.y, z: c.z }, optional: true }));
-            plan.calls = [...exact, ...plan.calls.map((c, k) => (k === 0 ? { ...c, topUp: n } : { ...c, topUp: n, rest: true }))];
+            const firstSearch = plan.calls.findIndex((c) => c.tool === 'collect_block');
+            plan.calls = [...exact, ...plan.calls.map((c, k) => (c.tool !== 'collect_block' ? c : k === firstSearch ? { ...c, topUp: n } : { ...c, topUp: n, rest: true }))];
+          } else {
+            // the pool's shore first, above an open source, so the pour starts within reach (a scripted test run, 2026-10-14: at
+            // lakes their pour found no stance and nothing came in); a walk there that fails changes nothing
+            const pnow = latest.position ? floorPos(latest.position) : null;
+            const lavaNow = await rpc('view_blocks', { find: { block_names: ['lava'], limit: 64 } }, 10_000).catch(() => null);
+            const sources = (lavaNow?.result?.blocks?.find?.[0]?.listed ?? []).filter((l) => !Number.isFinite(l.level) || l.level === 0).map(floorPos)
+              .filter((l) => pnow && Math.hypot(l.x - pnow.x, l.y - pnow.y, l.z - pnow.z) <= LAVA_NEAR);
+            const stance = sources.length ? await poolStance(sources).catch(() => null) : null;
+            if (stance && stance.d > 3) {
+              plan.calls = [{ tool: 'navigate', args: { x: stance.x, y: stance.y, z: stance.z }, optional: true, quiet: true }, ...plan.calls];
+              plan.note = `${plan.note ? `${plan.note}; ` : ''}stood on the pool's shore at ${stance.x} ${stance.y} ${stance.z} first`;
+            }
           }
         }
       }
@@ -1206,6 +1320,25 @@ export function createMineAiBody({ config, log, hosts, gameId, username, viewId 
               ? `${res.result}; the nearest place to stand near there: go_to ${spot.x} ${spot.y} ${spot.z}`
               : `${res.result}; around there is open air or liquid as far as can be seen: aim at a cave floor you can see, or let collect walk to its target (it finds a way down by itself)` };
           }
+          // drops it could not pick up (their "the rest were mined but never recovered": logs of a dark oak whose drops
+          // stayed in its leaves, a test run 2026-10-14; gravel in g0842ff): once more for what is missing, elsewhere
+          if (!res.ok && call.tool === 'collect_block' && !Number.isInteger(call.args?.x) && /never recovered|DROP_RECOVERY_EXHAUSTED/i.test(`${res.result} ${res.theirs ?? ''}`) && !retried.has(`drops:${i}`) && deadline - Date.now() > 15_000 && !ctl.stopped) {
+            const got = Number(out.output?.result?.collected?.gained) || 0;
+            const left = Math.max(0, (Number(call.args?.count) || 1) - got);
+            if (left > 0) {
+              retried.add(`drops:${i}`);
+              calls[i] = { ...call, args: { ...call.args, count: left } };
+              parts.push({ ok: true, result: `${doneSoFar(call.tool, out.output, call) ?? `collected ${got}`}; the drops it could not reach were left, and it went on for the other ${left}`, code: null });
+              i -= 1;
+              continue;
+            }
+          }
+          // a collect whose time ran out as its last block came in: done (g2409ce: "timed out after 340 s" with all 11
+          // obsidian in)
+          if (!res.ok && res.code === 'TIMED_OUT' && call.tool === 'collect_block' && !Number.isInteger(call.args?.x)) {
+            const got = Number(out.output?.result?.collected?.gained) || 0;
+            if (got >= (Number(call.args?.count) || 1)) res = { ok: true, code: null, result: `${doneSoFar(call.tool, out.output, call) ?? `collected ${got}`} (its time ran out as it finished)`, theirs: res.theirs };
+          }
           // the obsidian search that brought nothing in: why, and what else to do, at once
           if (ctl.stalled && !res.ok) {
             const why = await obsidianStuck(ctl.stalled.mined).catch(() => null);
@@ -1231,6 +1364,14 @@ export function createMineAiBody({ config, log, hosts, gameId, username, viewId 
               parts.push({ ok: true, result: 'it was standing in the portal: stepped out of it to enter again after the game\'s cooldown', code: null });
               continue;
             }
+          }
+          // a placement the server did not confirm in time (their "Event blockUpdate ... did not fire within timeout"):
+          // the same build once more at once; their audit works only the cells still wrong (g2409ce)
+          if (!res.ok && call.tool === 'build_structure' && /did not fire within timeout|physical verification/i.test(`${res.result} ${res.theirs ?? ''}`) && !retried.has(`verify:${i}`) && !ctl.stopped) {
+            retried.add(`verify:${i}`);
+            parts.push({ ok: true, result: 'the server did not confirm one placement in time; the build went on at the same cells', code: null });
+            i -= 1;
+            continue;
           }
           // a cell of the portal's site that is no longer what the read before the build saw (real game gd7540a,
           // 2026-10-14: three frames in a row stopped at "The requested cell at 477,75,-7 is air, not stone", a cell
@@ -1316,11 +1457,22 @@ export function createMineAiBody({ config, log, hosts, gameId, username, viewId 
               // again failed with "No furnace is carried for temporary use", the furnace on the ground beside it): the
               // try again, and the smelt calls after it, use that furnace
               if (!ctl.stopped && call.tool === 'smelt_item' && call.args?.temporary_workstation) await smeltAtLeftFurnace(calls, i);
-              if (!ctl.stopped) { parts.push({ ok: true, result: `a reflex took the body over (${takeover}); tried again once it let go`, code: null }); i -= 1; continue; }
+              // a hunt or a collect goes on for what is still missing (what it got before the fight stays counted)
+              let left = null;
+              if (call.tool === 'collect_mob_drop' || (call.tool === 'collect_block' && !Number.isInteger(call.args?.x))) {
+                const r0 = out.output?.result ?? {};
+                const got = Number(call.tool === 'collect_mob_drop' ? r0.hunt?.gained : r0.collected?.gained) || 0;
+                left = Math.max(0, (Number(call.args?.count) || 1) - got);
+                if (left > 0 && got > 0) calls[i] = { ...call, args: { ...call.args, count: left } };
+              }
+              if (!ctl.stopped && left === 0) { own = null; res = { ...res, ok: true, code: null, result: `${doneSoFar(call.tool, out.output, call) ?? 'done'} (a reflex took the body over at the end: ${takeover})` }; }
+              else if (!ctl.stopped) { parts.push({ ok: true, result: `a reflex took the body over (${takeover}); ${call.tool === 'collect_mob_drop' ? 'the hunt went on' : call.tool === 'collect_block' ? 'the collect went on' : 'tried again'} once it let go${left ? ` (${left} still to get)` : ''}`, code: null }); i -= 1; continue; }
             }
-            own = null;
-            const sofar = doneSoFar(call.tool, out.output, call);
-            res = { ok: false, code: 'INTERRUPTED', result: `${sofar ? `${sofar}; ` : ''}a reflex took the body over (${takeover}) before ${call.tool.replace(/_/g, ' ')} was done; nothing is wrong with the step: send it again once the mobs are dealt with` };
+            if (!res.ok) {
+              own = null;
+              const sofar = doneSoFar(call.tool, out.output, call);
+              res = { ok: false, code: 'INTERRUPTED', result: `${sofar ? `${sofar}; ` : ''}a reflex took the body over (${takeover}) before ${call.tool.replace(/_/g, ' ')} was done; nothing is wrong with the step: send it again once the mobs are dealt with` };
+            }
           }
           const o = ownChange(call.tool, out.output, call);
           if (o === null) own = null;
@@ -1392,7 +1544,13 @@ export function createMineAiBody({ config, log, hosts, gameId, username, viewId 
     if (built) lastBuild = r.ok || r.code === 'BODY_RESTARTED' ? null : built;
     // a Nether portal frame that failed at its site (cells kept, water inside, lava): never continued there; one short of
     // obsidian is (the review of M8a: a bad site was resumed within 12 blocks and refused again and again)
-    if (built?.blueprint === 'nether_portal' && !r.ok && r.code !== 'NEED_ITEMS') lastBuild = null;
+    // a frame that stopped on a placement the server did not confirm in time, or a cell it could not reach, is not a
+    // bad site: the next build continues it (real game g2409ce, 2026-10-14: 17 of 18 cells stood after a
+    // "blockUpdate did not fire" timeout, and the next build began a second frame facing south with the last 3 obsidian)
+    const hiccup = /did not fire within timeout|physical verification|could not be reached|no way there was found|path search gave up/i.test(String(r.result ?? '')) && !/kept|water|lava|not a portal frame|could not clear/i.test(String(r.result ?? ''));
+    if (built?.blueprint === 'nether_portal' && !r.ok && r.code !== 'NEED_ITEMS' && !hiccup) lastBuild = null;
+    // the cells of an unfinished frame taken back for this one: free for anyone again
+    if (reclaimed?.length) for (const c of reclaimed) frames.delete(frameKey(dimension ?? 'overworld', c));
     if (built?.blueprint === 'nether_portal' || (tool === 'place' && v.args.block === 'obsidian' && r.ok)) {
       // the obsidian this game put down (or may have): no other game's collect takes it, and dismantle takes it back
       const cells = tool === 'place' ? [v.args.pos] : built.cells.filter((c) => c.block_name === 'obsidian');
