@@ -252,13 +252,14 @@ const EXPECTED = {
   // 22: a second fill without an empty bucket (the real game's first fill had timed out; here it worked): not checked;
   // 24, 34: no pool within 16 blocks (the reply names the nearest); 26: a reflex took the collect over; 29: the death;
   // 39: lava next to the frame's site
-  g0793f1: { 22: null, 24: 'LAVA', 26: 'INTERRUPTED', 29: 'DIED', 34: 'LAVA', 39: 'LAVA' },
+  // 26: the collect a reflex cut short goes on after it now, as the real game's took a second call for
+  g0793f1: { 22: null, 24: 'LAVA', 29: 'DIED', 34: 'LAVA', 39: 'LAVA' },
   // 0: the real game's first collect found no path out of the 24-block shaft the pre-play dig made (fixed, and the fake
   // never dug it): ok here; 1: go_to {pos}, refused in a real game, runs; the bucket fills, walks and the frame that
   // failed for the world's reasons (a flowing cell, reflexes, paths, one stone cell kept): not checked; 46: stopped by
   // The agent; 55, 57: the stone hillside and the birch leaves are cleared first and built on; 58: not checked
   // 5: the zombie; 6: the death in the middle of the shelter (the fake's shelter is done); 23, 32: walks the world stopped
-  g08370a: { 5: 'INTERRUPTED', 6: null, 23: null, 32: null },
+  g08370a: { 6: null, 23: null, 32: null },
   // the walks the world stopped (16, 18), the agent's stop (17), the lit portal and the pools (23, 25: refused as in
   // the real game), the frames after the first two (36 to 45: built or not, the world's business here)
   // 23: refused when that frame is unknown, released when g0793f1's replay (earlier in this file) left it there, as it did

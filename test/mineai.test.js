@@ -120,7 +120,7 @@ test('mineai skills: our 10 skills and craft_batch become their actions', () => 
   // a failed portal action is never "went through"
   assert.equal(fromTheirs('enter_nether_portal', { result: { status: 'failed', error: '[NAVIGATION_PORTAL_NO_EDGE] No supported entry.' } }).result, 'failed: No supported entry.');
   // obsidian and diamonds get longer than a collect's 3 minutes; other blocks keep it
-  assert.equal(toTheirs('collect', { block: 'obsidian', n: 12 }, ctx).timeoutMs, 360_000);
+  assert.equal(toTheirs('collect', { block: 'obsidian', n: 12 }, ctx).timeoutMs, 480_000, '2 min and 30 s a block (g2409ce)');
   assert.equal(toTheirs('collect', { block: 'deepslate_diamond_ore', n: 3 }, ctx).timeoutMs, 330_000);
   assert.equal(toTheirs('collect', { block: 'stone', n: 12 }, ctx).timeoutMs, undefined);
   assert.equal(toTheirs('go_to', { x: 0, y: 70, z: 0 }, { ...ctx, position: { x: 0, y: -50, z: 0 } }).timeoutMs, 240_000, 'a climb of 120 blocks: 2 minutes and 2 s a block past 60');
@@ -1207,11 +1207,13 @@ test('mineai body: build again where an incomplete build stands continues it, an
   }
 });
 
-test('mineai start check: a runtime built before patch 0009, 0010, 0011, 0012, 0013, 0014 or 0015 is refused', () => {
+test('mineai start check: a runtime built before patch 0009, 0010, 0011, 0012, 0013, 0014, 0015 or 0016 is refused', () => {
   const up = readUpstream();
-  assert.ok(up.patches.at(-1).endsWith('0015-collect-spares-lit-frame-corners.patch'));
-  assert.match(fs.readFileSync(up.patches.at(-1), 'utf8'), /0015: a corner, at an edge of the portal/);
-  up.patches = up.patches.slice(0, -1); // the checks below count back from 0014
+  assert.ok(up.patches.at(-1).endsWith('0016-cast-pools-from-their-shore.patch'));
+  assert.match(fs.readFileSync(up.patches.at(-1), 'utf8'), /export function poolSourceOrder/);
+  assert.ok(up.patches.at(-2).endsWith('0015-collect-spares-lit-frame-corners.patch'));
+  assert.match(fs.readFileSync(up.patches.at(-2), 'utf8'), /0015: a corner, at an edge of the portal/);
+  up.patches = up.patches.slice(0, -2); // the checks below count back from 0014
   assert.ok(up.patches.at(-6).endsWith('0009-placement-around-a-mob.patch'));
   assert.match(fs.readFileSync(up.patches.at(-6), 'utf8'), /overlaps bat #44444/);
   assert.ok(up.patches.at(-5).endsWith('0010-build-never-stalls-the-event-loop.patch'));
@@ -1233,7 +1235,7 @@ test('mineai start check: a runtime built before patch 0009, 0010, 0011, 0012, 0
   }
   const all = readUpstream();
   fs.writeFileSync(path.join(dir, STAMP), JSON.stringify(stampFor(up)));
-  assert.match(checkFetched(dir, all).why, /other patch files/, 'built before 0015: refused');
+  assert.match(checkFetched(dir, all).why, /other patch files/, 'built before 0015 and 0016: refused');
   fs.writeFileSync(path.join(dir, STAMP), JSON.stringify(stampFor(all)));
   assert.match(checkFetched(dir, all).why, /has HEAD/, 'with every patch the stamp passes; the folder is still checked further');
 });

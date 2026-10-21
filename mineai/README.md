@@ -41,6 +41,7 @@ runs it). Our patches are offered under the same MIT licence as the upstream cod
 | `0013-shield-waits-for-short-actions` | The hostile reflex's shield preparation waits for a short action of the player's (a craft, a smelt, an equip) to finish instead of interrupting it |
 | `0014-collect-spares-lit-portal-frames` | `collect_block`'s search never takes obsidian from a lit nether portal's frame (an exact cell still can); with every loaded obsidian in lit frames it casts obsidian from lava instead |
 | `0015-collect-spares-lit-frame-corners` | The same for a lit frame's corners: obsidian with a portal block on any of the 26 cells around it |
+| `0016-cast-pools-from-their-shore` | A cast onto a lava lake starts from its shore: open sources beside the shore first, then open ones, then those under lava; a pour that forms nothing gives up its stance, the pool after 3 |
 
 To build a runtime by hand (Bun 1.4 or newer, git, Node):
 
